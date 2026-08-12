@@ -1,0 +1,32 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: vyom-db
+    environment:
+      POSTGRES_USER: vyom
+      POSTGRES_PASSWORD: vyom
+      POSTGRES_DB: vyom
+    ports:
+      - "5432:5432"
+    volumes:
+      - vyom_pgdata:/var/lib/postgresql/data
+      # Auto-applies schema on first start
+      - ./src/vyom/store/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vyom -d vyom"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: vyom-mlflow
+    command: mlflow server --host 0.0.0.0 --port 5000 --backend-store-uri sqlite:///mlruns/mlflow.db
+    ports:
+      - "5001:5000"
+    volumes:
+      - vyom_mlflow:/mlflow/mlruns
+
+volumes:
+  vyom_pgdata:
+  vyom_mlflow:
