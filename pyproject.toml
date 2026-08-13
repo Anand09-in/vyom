@@ -12,6 +12,7 @@ dependencies = [
     "langchain-core>=0.3",
     "numpy>=1.26",
     "tenacity>=8.3",
+    "pypdf>=4.2",
 ]
 
 [project.optional-dependencies]

@@ -25,10 +25,10 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://vyom:vyom@localhost:5432/vyom"
     db_pool_min: int = 2
     db_pool_max: int = 10
-    embedding_dim: int = 1024
+    embedding_dim: int = 384
 
     # ── Local provider (free dev) ─────────────────────────────────────────────
-    local_embed_model: str = "BAAI/bge-m3"
+    local_embed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     local_rerank_model: str = "BAAI/bge-reranker-v2-m3"
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:7b"

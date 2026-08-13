@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS filing_chunks (
     chunk_index  INT          NOT NULL,
     content      TEXT         NOT NULL,
     context_prefix TEXT,                 -- contextual-retrieval prefix sentence
-    embedding    vector(1024),
+    embedding    vector(384),
     tsv          tsvector GENERATED ALWAYS AS (
                      to_tsvector('english', coalesce(context_prefix, '') || ' ' || content)
                  ) STORED,
@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS circular_chunks (
     circular_id     BIGINT       NOT NULL REFERENCES circulars(id) ON DELETE CASCADE,
     chunk_index     INT          NOT NULL,
     content         TEXT         NOT NULL,
-    embedding       vector(1024),
+    embedding       vector(384),
     tsv             tsvector GENERATED ALWAYS AS (
                         to_tsvector('english', content)
                     ) STORED,
@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS rbi_chunks (
     series_id   TEXT         NOT NULL REFERENCES rbi_series(series_id) ON DELETE CASCADE,
     period      TEXT         NOT NULL,          -- e.g. '2024-Q3', '2024-10'
     content     TEXT         NOT NULL,          -- human-readable narrative summary
-    embedding   vector(1024),
+    embedding   vector(384),
     tsv         tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     UNIQUE (series_id, period)
 );

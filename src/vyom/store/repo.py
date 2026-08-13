@@ -75,7 +75,7 @@ class Repository:
         pdf_s3_key: str | None = None,
     ) -> int:
         async with self._pool.connection() as conn:
-            row = await conn.fetchrow(
+            cur = await conn.execute(
                 """
                 INSERT INTO filings
                     (company_name, bse_code, nse_symbol, filing_type, filing_date, source_url, pdf_s3_key)
@@ -84,9 +84,10 @@ class Repository:
                 DO UPDATE SET source_url = EXCLUDED.source_url
                 RETURNING id
                 """,
-                company_name, bse_code, nse_symbol, filing_type,
-                filing_date, source_url, pdf_s3_key,
+                (company_name, bse_code, nse_symbol, filing_type,
+                 filing_date, source_url, pdf_s3_key),
             )
+            row = await cur.fetchone()
             return row["id"]
 
     async def insert_filing_chunks(self, filing_id: int, chunks: list[dict]) -> None:
@@ -173,7 +174,7 @@ class Repository:
         pdf_s3_key: str | None = None,
     ) -> int:
         async with self._pool.connection() as conn:
-            row = await conn.fetchrow(
+            cur = await conn.execute(
                 """
                 INSERT INTO circulars
                     (circular_number, title, category, issue_date, source_url, pdf_s3_key)
@@ -182,8 +183,9 @@ class Repository:
                 DO UPDATE SET title = EXCLUDED.title
                 RETURNING id
                 """,
-                circular_number, title, category, issue_date, source_url, pdf_s3_key,
+                (circular_number, title, category, issue_date, source_url, pdf_s3_key),
             )
+            row = await cur.fetchone()
             return row["id"]
 
     async def insert_circular_chunks(self, circular_id: int, chunks: list[dict]) -> None:
@@ -263,21 +265,22 @@ class Repository:
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (series_id) DO UPDATE SET title = EXCLUDED.title
                 """,
-                series_id, title, category, frequency, units, notes,
+                (series_id, title, category, frequency, units, notes),
             )
 
     async def upsert_rbi_observations(
         self, series_id: str, observations: list[dict]
     ) -> None:
         async with self._pool.connection() as conn:
-            await conn.executemany(
-                """
-                INSERT INTO rbi_observations (series_id, obs_date, value)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (series_id, obs_date) DO UPDATE SET value = EXCLUDED.value
-                """,
-                [(series_id, o["date"], o["value"]) for o in observations],
-            )
+            async with conn.cursor() as cur:
+                await cur.executemany(
+                    """
+                    INSERT INTO rbi_observations (series_id, obs_date, value)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (series_id, obs_date) DO UPDATE SET value = EXCLUDED.value
+                    """,
+                    [(series_id, o["date"], o["value"]) for o in observations],
+                )
 
     async def insert_rbi_chunks(self, chunks: list[dict]) -> None:
         async with self._pool.connection() as conn:
@@ -344,10 +347,11 @@ class Repository:
         cols = ", ".join(kwargs)
         placeholders = ", ".join(f"%({k})s" for k in kwargs)
         async with self._pool.connection() as conn:
-            row = await conn.fetchrow(
+            cur = await conn.execute(
                 f"INSERT INTO query_log ({cols}) VALUES ({placeholders}) RETURNING id",
                 kwargs,
             )
+            row = await cur.fetchone()
             return row["id"]
 
     async def log_feedback(
