@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     local_embed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     local_rerank_model: str = "BAAI/bge-reranker-v2-m3"
     ollama_host: str = "http://localhost:11434"
-    ollama_model: str = "qwen2.5:7b"
+    ollama_model: str = "qwen2.5:3b"
 
     # ── Bedrock provider (AWS deploy) ─────────────────────────────────────────
     aws_region: str = "ap-south-1"

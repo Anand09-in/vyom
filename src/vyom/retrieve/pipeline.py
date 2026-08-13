@@ -22,6 +22,7 @@ The LLM never picks its own next action at runtime.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TypedDict
@@ -88,7 +89,7 @@ def build_pipeline(
     """
 
     # ── Node 1: classify_and_rewrite ──────────────────────────────────────────
-    def classify_and_rewrite(state: VyomState) -> VyomState:
+    async def classify_and_rewrite(state: VyomState) -> VyomState:
         """
         Two jobs in one node:
         1. Route the query to the right source(s) using keyword signals.
@@ -98,8 +99,11 @@ def build_pipeline(
         """
         decision = route(state["query"], enabled_sources)
 
-        # HyDE: generate a hypothetical answer for better embedding
-        hyp = provider.generate(
+        # HyDE: generate a hypothetical answer for better embedding.
+        # provider.generate() is a blocking network call — offload it so it
+        # doesn't freeze the server's event loop for every other request.
+        hyp = await asyncio.to_thread(
+            provider.generate,
             f"Write one short paragraph that would answer this question about "
             f"an Indian company or financial regulation: {state['query']}",
             system=(
@@ -123,7 +127,10 @@ def build_pipeline(
         Only sources in the RouteDecision are queried — a BSE-only query
         never touches the SEBI or RBI tables.
         """
-        embedding = provider.embed_query(state["rewritten_query"])
+        # provider.embed_query()/rerank() are synchronous CPU-bound calls —
+        # offload them so they don't freeze the server's event loop for
+        # every other request while they run.
+        embedding = await asyncio.to_thread(provider.embed_query, state["rewritten_query"])
         decision: RouteDecision = state["route"]
         sources = decision.sources
         company = state.get("company")
@@ -141,7 +148,9 @@ def build_pipeline(
             )
             if raw:
                 texts = [c.content for c in raw]
-                ranked = provider.rerank(state["query"], texts, top_n=rerank_top_n)
+                ranked = await asyncio.to_thread(
+                    provider.rerank, state["query"], texts, top_n=rerank_top_n
+                )
                 filing_chunks = [raw[r.index] for r in ranked]
 
         if "sebi" in sources:
@@ -152,7 +161,9 @@ def build_pipeline(
             )
             if raw_s:
                 texts = [c.content for c in raw_s]
-                ranked = provider.rerank(state["query"], texts, top_n=rerank_top_n)
+                ranked = await asyncio.to_thread(
+                    provider.rerank, state["query"], texts, top_n=rerank_top_n
+                )
                 circular_chunks = [raw_s[r.index] for r in ranked]
 
         if "rbi" in sources:
@@ -163,7 +174,9 @@ def build_pipeline(
             )
             if raw_r:
                 texts = [c.content for c in raw_r]
-                ranked = provider.rerank(state["query"], texts, top_n=min(rerank_top_n, 3))
+                ranked = await asyncio.to_thread(
+                    provider.rerank, state["query"], texts, top_n=min(rerank_top_n, 3)
+                )
                 rbi_chunks = [raw_r[r.index] for r in ranked]
 
         return {
@@ -202,7 +215,7 @@ def build_pipeline(
         return {**state, "loop_count": state.get("loop_count", 0) + 1}
 
     # ── Node 4: generate ───────────────────────────────────────────────────────
-    def generate(state: VyomState) -> VyomState:
+    async def generate(state: VyomState) -> VyomState:
         """
         Assemble context from all retrieved chunks and call the LLM.
         Citations are tagged inline: [BSE:id], [SEBI:id], [RBI:id].
@@ -278,7 +291,7 @@ def build_pipeline(
             "Answer with inline citations [BSE:id], [SEBI:id], or [RBI:series_id]:"
         )
 
-        answer = provider.generate(prompt, system=SYSTEM_PROMPT)
+        answer = await asyncio.to_thread(provider.generate, prompt, system=SYSTEM_PROMPT)
         latency = int((time.monotonic() - t0) * 1000)
 
         return {
