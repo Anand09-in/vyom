@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import AsyncIterator
 
@@ -183,9 +184,14 @@ async def query_stream(
 
         result = await pipeline.ainvoke(_make_initial_state(req, decision))
 
-        # Stream answer word by word
-        for word in result["answer"].split():
-            yield {"event": "token", "data": word + " "}
+        # Stream answer word by word, preserving the model's original
+        # whitespace (newlines, blank lines between list items, etc.) —
+        # each token is one word plus whatever whitespace immediately
+        # follows it. JSON-encoded so a literal newline survives SSE's
+        # line-based framing intact, and so the client can dispatch
+        # purely on `event:` type instead of guessing from content shape.
+        for match in re.finditer(r"\S+\s*", result["answer"]):
+            yield {"event": "token", "data": json.dumps(match.group())}
             await asyncio.sleep(0)   # yield to event loop between tokens
 
         # Final metadata

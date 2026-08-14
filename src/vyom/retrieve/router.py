@@ -197,17 +197,35 @@ def route(
     sebi_hits  = _count_hits(query, _SEBI_SIGNALS)
     rbi_hits   = _count_hits(query, _RBI_SIGNALS)
 
-    # ── Cross-source: explicit combination intent ──────────────────────────────
+    per_source_hits = {"bse": bse_hits, "sebi": sebi_hits, "rbi": rbi_hits}
+    sources_with_signal = [s for s, hits in per_source_hits.items() if hits > 0]
+
+    # ── Cross-source: explicit trigger phrase OR real signal from 2+ sources ──
+    # Two distinct ways a query can be cross-source:
+    #  1. An explicit _CROSS_TRIGGERS phrase matches (e.g. "repo rate...
+    #     impact on bank margins"). These patterns are written to imply two
+    #     source categories by construction even when generic words like
+    #     "bank"/"margins" aren't themselves in the per-source keyword lists
+    #     — so search all three sources, since we can't cheaply tell which
+    #     two the trigger meant.
+    #  2. No trigger phrase matches, but the query independently contains
+    #     real signal words from 2+ distinct source categories (e.g. names
+    #     both "Reliance" and "RBI"). The _CROSS_TRIGGERS patterns require
+    #     specific word order/proximity and miss many legitimate phrasings
+    #     — this catches those without over-triggering on ordinary
+    #     single-source queries that only ever hit one category.
     if cross_hits > 0 and "cross" in enabled:
-        sources = []
-        if bse_hits > 0 or cross_hits:
-            sources.append("bse")
-        if sebi_hits > 0 or cross_hits:
-            sources.append("sebi")
-        if rbi_hits > 0 or cross_hits:
-            sources.append("rbi")
-        # Filter to only enabled, fall back to bse if nothing matched
-        sources = [s for s in sources if s in enabled] or ["bse"]
+        sources = [s for s in ("bse", "sebi", "rbi") if s in enabled] or ["bse"]
+        return RouteDecision(
+            sources=sources,
+            rationale=(
+                f"Cross-source query detected — pulling from "
+                f"{' + '.join(s.upper() for s in sources)}"
+            ),
+        )
+
+    if len(sources_with_signal) >= 2 and "cross" in enabled:
+        sources = [s for s in sources_with_signal if s in enabled] or ["bse"]
         return RouteDecision(
             sources=sources,
             rationale=(

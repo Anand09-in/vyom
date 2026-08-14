@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import TypedDict
 
@@ -37,6 +38,24 @@ logger = logging.getLogger(__name__)
 
 # ── System prompt ──────────────────────────────────────────────────────────────
 
+def _normalize_list_formatting(text: str) -> str:
+    """Force numbered/bulleted points onto their own line.
+
+    The system prompt asks the model to do this itself, but generation
+    models don't reliably comply — they often run "1. ... 2. ... 3. ..."
+    together in one flowing paragraph. This is a deterministic backstop:
+    insert a paragraph break before a numbered marker followed by bold
+    text (e.g. "1. **Title**" — the pattern every point actually uses),
+    and before a bullet dash that follows sentence-ending punctuation or
+    a bold marker. Restricting the bullet match to follow `.`, `:`, `*`,
+    or `]` (not preceded by a bare digit) avoids splitting a genuine
+    numeric range like "5 - 10 percent".
+    """
+    text = re.sub(r" (?=\d{1,2}\.\s\*\*)", "\n\n", text)
+    text = re.sub(r"([.:*\]])\s+-(?=\s)", r"\1\n\n-", text)
+    return text
+
+
 SYSTEM_PROMPT = """You are Vyom, an Indian financial intelligence assistant.
 
 You have access to three data sources:
@@ -46,10 +65,20 @@ You have access to three data sources:
 
 Rules you must follow:
 1. Answer ONLY from the retrieved context provided below. Never use prior knowledge.
-2. Every factual claim must cite its source: [BSE:chunk_id], [SEBI:chunk_id], or [RBI:series_id].
+2. Every factual claim must cite its source using the exact tag shown at
+   the start of that chunk's context, e.g. [BSE:1042], [SEBI:317],
+   [RBI:REPO_RATE:2025-Q2]. Copy the tag exactly as given — for RBI this
+   includes the period, since the same series can appear at multiple
+   periods and the period is what makes each citation unique. Never use
+   the literal words "chunk_id" or "series_id" — always substitute the
+   actual value.
 3. If the context is insufficient to answer, say so clearly — never fabricate facts.
 4. When multiple sources are available, synthesise across them.
 5. Use plain English. Avoid jargon unless it appears in the source.
+6. Structure multi-part answers as separate lines: put each numbered or
+   bulleted point on its own line (real newline, not inline), with a
+   blank line between points. Never run multiple numbered points together
+   in one paragraph.
 """
 
 
@@ -272,8 +301,12 @@ def build_pipeline(
         if rbi:
             context_parts.append("── RBI ECONOMIC DATA ──")
             for c in rbi:
+                # series_id alone isn't unique when multiple periods of the
+                # same series are retrieved (e.g. REPO_RATE for 2024-Q4 and
+                # 2025-Q2 both) — include the period in the tag itself so
+                # each chunk has a distinct citation id to copy.
                 context_parts.append(
-                    f"[RBI:{c.series_id}] {c.period}\n{c.content}"
+                    f"[RBI:{c.series_id}:{c.period}]\n{c.content}"
                 )
                 citations.append({
                     "type": "rbi",
@@ -288,10 +321,13 @@ def build_pipeline(
             f"Sources available: {sources_label}\n\n"
             f"Context:\n{context}\n\n"
             f"Question: {state['query']}\n\n"
-            "Answer with inline citations [BSE:id], [SEBI:id], or [RBI:series_id]:"
+            "Answer with inline citations, copying each tag exactly as it "
+            "appears at the start of its chunk above, e.g. [BSE:1042], "
+            "[SEBI:317], [RBI:REPO_RATE:2025-Q2]:"
         )
 
         answer = await asyncio.to_thread(provider.generate, prompt, system=SYSTEM_PROMPT)
+        answer = _normalize_list_formatting(answer)
         latency = int((time.monotonic() - t0) * 1000)
 
         return {
