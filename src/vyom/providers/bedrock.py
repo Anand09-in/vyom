@@ -1,20 +1,31 @@
 """Bedrock provider — Amazon Bedrock for the AWS deployment.
 
-Pay-per-token. No models to host, so idle cost is near zero.
-This is the provider used when VYOM_PROVIDER=bedrock.
+Pay-per-token for generation. This is the provider used when VYOM_PROVIDER=bedrock.
 
 Generation uses the Bedrock Converse API — one interface for all model families
-(Claude, Titan, Llama) so switching models is a config change, not a code change.
+(Claude, Titan, Llama, Mistral, DeepSeek) so switching models is a config
+change, not a code change.
+
+embed()/embed_query()/rerank() deliberately delegate to a local LocalProvider
+instance rather than calling Bedrock's Titan/Rerank APIs: embedding and
+reranking run cheaply and fast on local CPU/GPU with no per-call cost or
+quota, whereas generation needs a model too large to run locally. So
+"bedrock provider" here specifically means "generation via Bedrock, embedding
+and reranking via local models" — not "everything via AWS." (Bedrock's
+Rerank API is also blocked by an IAM permissions gap on this account, and its
+Titan embed() implementation calls invoke_model once per text with no
+batching — a real bottleneck at ingest volume — so local wins outright here
+even setting quota concerns aside.)
 """
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Iterator
 from functools import cached_property
 
 from vyom.config import Settings
 from vyom.providers.base import Provider, RerankResult
+from vyom.providers.local import LocalProvider
 
 logger = logging.getLogger(__name__)
 
@@ -30,22 +41,14 @@ class BedrockProvider(Provider):
         return boto3.client("bedrock-runtime", region_name=self._s.aws_region)
 
     @cached_property
-    def _agent_runtime(self):
-        # Rerank lives on the bedrock-agent-runtime surface
-        import boto3
-
-        return boto3.client("bedrock-agent-runtime", region_name=self._s.aws_region)
+    def _local(self) -> LocalProvider:
+        return LocalProvider(self._s)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """Titan embeds one text per API call."""
-        results: list[list[float]] = []
-        for text in texts:
-            resp = self._runtime.invoke_model(
-                modelId=self._s.bedrock_embed_model,
-                body=json.dumps({"inputText": text}),
-            )
-            results.append(json.loads(resp["body"].read())["embedding"])
-        return results
+        return self._local.embed(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._local.embed_query(text)
 
     def generate(self, prompt: str, *, system: str | None = None) -> str:
         resp = self._runtime.converse(
@@ -72,29 +75,4 @@ class BedrockProvider(Provider):
         *,
         top_n: int | None = None,
     ) -> list[RerankResult]:
-        resp = self._agent_runtime.rerank(
-            queries=[{"type": "TEXT", "textQuery": {"text": query}}],
-            sources=[
-                {
-                    "type": "INLINE",
-                    "inlineDocumentSource": {
-                        "type": "TEXT",
-                        "textDocument": {"text": doc},
-                    },
-                }
-                for doc in documents
-            ],
-            rerankingConfiguration={
-                "type": "BEDROCK_RERANKING_MODEL",
-                "bedrockRerankingConfiguration": {
-                    "numberOfResults": top_n or len(documents),
-                    "modelConfiguration": {
-                        "modelArn": self._s.bedrock_rerank_model,
-                    },
-                },
-            },
-        )
-        return [
-            RerankResult(index=r["index"], score=float(r["relevanceScore"]))
-            for r in resp["results"]
-        ]
+        return self._local.rerank(query, documents, top_n=top_n)

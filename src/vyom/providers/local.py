@@ -30,7 +30,11 @@ class LocalProvider(Provider):
         from sentence_transformers import SentenceTransformer
 
         logger.info("Loading embedding model %s …", self._s.local_embed_model)
-        return SentenceTransformer(self._s.local_embed_model)
+        return SentenceTransformer(
+            self._s.local_embed_model,
+            trust_remote_code=True,
+            truncate_dim=self._s.embedding_dim,
+        )
 
     @cached_property
     def _reranker(self):
@@ -42,13 +46,43 @@ class LocalProvider(Provider):
     # ── Provider interface ────────────────────────────────────────────────────
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        # nomic-embed models are trained with asymmetric query/document
+        # prefixes — this one is for indexed content, not queries. Embedding
+        # without it (or with the wrong one) still "works" but silently
+        # degrades retrieval quality, since the model wasn't trained that way.
+        prefixed = [f"search_document: {t}" for t in texts]
         vectors = self._embedder.encode(
-            texts,
+            prefixed,
             normalize_embeddings=True,
             convert_to_numpy=True,
             show_progress_bar=False,
         )
+        self._empty_cuda_cache()
         return [v.tolist() for v in vectors]
+
+    def embed_query(self, text: str) -> list[float]:
+        vectors = self._embedder.encode(
+            [f"search_query: {text}"],
+            normalize_embeddings=True,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
+        self._empty_cuda_cache()
+        return vectors[0].tolist()
+
+    @staticmethod
+    def _empty_cuda_cache() -> None:
+        # On GPU, torch caches freed tensor memory for reuse rather than
+        # returning it to the driver — fine for a single batch, but across
+        # hundreds of embed() calls in a long-running ingest, the cache
+        # grows until VRAM is exhausted and every allocation has to fight
+        # for fragmented memory (observed: ~1s/batch degrading to 400s+/batch
+        # once a 6GB card filled up). Releasing after every call keeps
+        # steady-state usage flat instead of monotonically growing.
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def generate(self, prompt: str, *, system: str | None = None) -> str:
         resp = httpx.post(
@@ -91,6 +125,7 @@ class LocalProvider(Provider):
         top_n: int | None = None,
     ) -> list[RerankResult]:
         scores = self._reranker.predict([(query, doc) for doc in documents])
+        self._empty_cuda_cache()
         ranked = sorted(
             (RerankResult(index=i, score=float(s)) for i, s in enumerate(scores)),
             key=lambda r: r.score,

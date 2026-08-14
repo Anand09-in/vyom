@@ -122,7 +122,14 @@ class Repository:
         top_k: int = 20,
         company: str | None = None,
     ) -> list[FilingChunk]:
-        company_filter = "AND f.company_name ILIKE %(company)s" if company else ""
+        # Match either the full company name or its NSE ticker — callers pass
+        # either form (e.g. "HDFC Bank" vs "HDFCBANK"), and for most companies
+        # the ticker isn't a substring of the full name so it wouldn't match
+        # company_name alone.
+        company_filter = (
+            "AND (f.company_name ILIKE %(company)s OR f.nse_symbol ILIKE %(company)s)"
+            if company else ""
+        )
         sql = f"""
         WITH dense AS (
             SELECT fc.id,

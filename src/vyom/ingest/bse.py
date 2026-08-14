@@ -22,6 +22,7 @@ import asyncio
 import logging
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 import httpx
@@ -130,8 +131,14 @@ async def _get_annual_report_url(
     scrip_code: str,
     company_name: str,
     client: httpx.AsyncClient,
-) -> str | None:
-    """Fetch the latest annual report PDF URL from BSE API."""
+) -> tuple[str, str] | None:
+    """Fetch the latest annual report's PDF URL and its actual filing date.
+
+    Returns (pdf_url, filing_date) — filing_date comes from BSE's own
+    `dt_tm` field, not the date we happen to run ingestion on, so re-running
+    ingestion on a different day doesn't create a duplicate `filings` row
+    for the same report (the uniqueness constraint is keyed on filing_date).
+    """
     try:
         url = BSE_ANNUALREPORT_URL.format(scrip_code=scrip_code)
         resp = await client.get(url, headers=HEADERS, timeout=30)
@@ -144,12 +151,16 @@ async def _get_annual_report_url(
             logger.warning("%s: no annual reports found", company_name)
             return None
 
-        file_name = (reports[0].get("file_name") or "").strip()
+        latest = reports[0]
+        file_name = (latest.get("file_name") or "").strip()
         if not file_name:
             logger.warning("%s: report entry has no file_name", company_name)
             return None
 
-        return _build_report_pdf_url(scrip_code, file_name)
+        dt_tm = (latest.get("dt_tm") or "").strip()
+        filing_date = dt_tm.split("T")[0] if dt_tm else str(date.today())
+
+        return _build_report_pdf_url(scrip_code, file_name), filing_date
 
     except Exception as exc:
         logger.error("%s: failed to get report URL — %s", company_name, exc)
@@ -199,11 +210,12 @@ async def _ingest_one_company(
 ) -> int:
     """Download, parse, chunk, embed, and store one company's annual report."""
 
-    # Step 1: get PDF URL
-    pdf_url = await _get_annual_report_url(scrip_code, company_name, client)
-    if not pdf_url:
+    # Step 1: get PDF URL and the report's actual filing date
+    result = await _get_annual_report_url(scrip_code, company_name, client)
+    if not result:
         logger.warning("%s: skipping — no PDF URL found", company_name)
         return 0
+    pdf_url, filing_date = result
 
     logger.info("%s: downloading from %s", company_name, pdf_url[:80])
 
@@ -235,13 +247,12 @@ async def _ingest_one_company(
     logger.info("%s: extracted %d characters", company_name, len(raw_text))
 
     # Step 4: upsert filing record
-    from datetime import date
     filing_id = await repo.upsert_filing(
         company_name=company_name,
         bse_code=scrip_code,
         nse_symbol=nse_symbol,
         filing_type="annual_report",
-        filing_date=str(date.today()),
+        filing_date=filing_date,
         source_url=pdf_url,
         pdf_s3_key=None,  # S3 upload added in Phase 4
     )
@@ -254,7 +265,7 @@ async def _ingest_one_company(
         chunk.section = _classify_section(chunk.content)
 
     # Add contextual prefix
-    doc_summary = f"{company_name} Annual Report {date.today().year}"
+    doc_summary = f"{company_name} Annual Report {filing_date[:4]}"
     raw_chunks = add_context_prefix(raw_chunks, doc_summary)
 
     if not raw_chunks:

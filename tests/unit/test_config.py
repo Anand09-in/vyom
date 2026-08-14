@@ -6,7 +6,7 @@ from vyom.config import Settings
 def test_defaults():
     s = Settings()
     assert s.provider == "local"
-    assert s.embedding_dim == 1024
+    assert s.embedding_dim == 512
     assert s.top_k == 20
 
 

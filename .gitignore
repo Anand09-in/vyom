@@ -14,6 +14,9 @@ data/
 *.sqlite
 mlruns/
 
+# Eval run artifacts — churn every run, not source of truth
+eval/results*.json
+
 # OS / editor
 .DS_Store
 .idea/

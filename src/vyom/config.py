@@ -1,7 +1,12 @@
 """Vyom — typed config loaded from .env (prefix: VYOM_).
 
 All settings live here. Nothing else in the codebase reads os.environ directly.
-Switch from local dev to AWS deploy by changing VYOM_PROVIDER=bedrock — nothing else changes.
+
+VYOM_PROVIDER=bedrock does NOT mean "everything via AWS" — it means
+generation via Bedrock (the only role needing a model too large to run
+locally). Embedding and reranking always run locally regardless of
+VYOM_PROVIDER, since they're cheap and fast on local CPU/GPU with no
+per-call API cost — see providers/bedrock.py for the reasoning.
 """
 from __future__ import annotations
 
@@ -25,23 +30,49 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://vyom:vyom@localhost:5432/vyom"
     db_pool_min: int = 2
     db_pool_max: int = 10
-    embedding_dim: int = 384
+    embedding_dim: int = 512
 
     # ── Local provider (free dev) ─────────────────────────────────────────────
-    local_embed_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    # nomic-embed-text-v1.5: English, 8192-token context (our chunker's
+    # 512-word chunks exceeded MiniLM's 256-token limit and were being
+    # silently truncated), higher MTEB retrieval score, truncated to
+    # embedding_dim via native Matryoshka support — no schema change needed.
+    local_embed_model: str = "nomic-ai/nomic-embed-text-v1.5"
     local_rerank_model: str = "BAAI/bge-reranker-v2-m3"
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:3b"
 
     # ── Bedrock provider (AWS deploy) ─────────────────────────────────────────
     aws_region: str = "ap-south-1"
+    # Used only by the RAGAS judge's answer_relevancy metric (eval/run_ragas.py),
+    # not by BedrockProvider — embedding always runs locally, see module docstring.
     bedrock_embed_model: str = "amazon.titan-embed-text-v2:0"
-    bedrock_gen_model: str = "anthropic.claude-3-5-sonnet-20241022-v2:0"
-    bedrock_rerank_model: str = "amazon.rerank-v1:0"
+    # Mistral Large 3, not Claude — Anthropic models on this account require
+    # an AWS Marketplace subscription with a valid payment instrument, which
+    # isn't set up yet. Deliberately a different model family from
+    # ragas_judge_bedrock_model (DeepSeek) below, so the judge isn't scoring
+    # output from its own model family. Works on-demand, no inference profile
+    # needed, 100 RPM / 100M TPM quota (Llama 3 70B's ~4 RPM throttled heavily).
+    bedrock_gen_model: str = "mistral.mistral-large-3-675b-instruct"
 
     # ── Data sources ──────────────────────────────────────────────────────────
     bse_download_folder: str = "./data/bse"
     s3_bucket: str = "vyom-raw-data"
+
+    # ── Eval (RAGAS judge) ────────────────────────────────────────────────────
+    # Independent of `provider`/`bedrock_gen_model`: the judge deliberately
+    # uses a third model family (DeepSeek), different from both the local
+    # Ollama model and bedrock_gen_model (Mistral), so it isn't scoring
+    # output from its own model family.
+    ragas_judge_provider: Literal["local", "bedrock"] = "local"
+    # Only used when ragas_judge_provider == "local".
+    ragas_judge_ollama_model: str = "qwen2.5:7b"
+    # Only used when ragas_judge_provider == "bedrock". DeepSeek V3.2 works
+    # on-demand with no inference profile or Marketplace subscription
+    # needed, and its on-demand quota (100 RPM / 100M TPM) is far higher
+    # than Llama 3 70B's, which throttled
+    # heavily even at serial (max_workers=1) execution.
+    ragas_judge_bedrock_model: str = "deepseek.v3.2"
 
     # ── Retrieval ─────────────────────────────────────────────────────────────
     top_k: int = 20
