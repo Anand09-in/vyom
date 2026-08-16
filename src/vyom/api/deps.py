@@ -10,11 +10,13 @@ from functools import lru_cache
 from vyom.config import get_settings
 from vyom.providers import get_provider
 from vyom.providers.base import Provider
+from vyom.store.history import HistoryStore
 from vyom.store.repo import AsyncConnectionPool, Repository
 
 # Module-level singletons — set during app startup lifespan
 _pool: AsyncConnectionPool | None = None
 _repo: Repository | None = None
+_history_store: HistoryStore | None = None
 
 
 async def get_pool() -> AsyncConnectionPool:
@@ -38,3 +40,10 @@ async def get_repo() -> Repository:
 def get_provider_dep() -> Provider:
     """Cached provider — models are loaded once, not per request."""
     return get_provider()
+
+
+def get_history_store() -> HistoryStore:
+    global _history_store
+    if _history_store is None:
+        _history_store = HistoryStore(get_settings())
+    return _history_store

@@ -1,12 +1,48 @@
 "use client";
-import { useState, useCallback } from "react";
-import { Message, Citation } from "@/types";
-import { queryStream, submitFeedback } from "@/lib/api";
+import { useState, useCallback, useEffect } from "react";
+import { Message, Citation, ConversationSummary } from "@/types";
+import {
+  queryStream,
+  submitFeedback,
+  getOrCreateSessionId,
+  setActiveSessionId,
+  fetchHistory,
+  deleteHistory,
+  fetchConversations,
+} from "@/lib/api";
 
 export function useChat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
   const [company, setCompany] = useState("");
+  const [sessionId, setSessionId] = useState("");
+  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+
+  const refreshConversations = useCallback(() => {
+    fetchConversations().then(setConversations);
+  }, []);
+
+  // Restore the visible thread from Redis on mount — conversation memory
+  // survives a refresh, not just the current tab's lifetime. Runs only in
+  // the browser (localStorage isn't available during SSR).
+  useEffect(() => {
+    const id = getOrCreateSessionId();
+    // sessionId is inherently client-only (reads localStorage, unavailable
+    // during SSR) — it can't be computed via a useState lazy initializer
+    // without risking a server/client hydration mismatch, so a synchronous
+    // setState here is the correct pattern, not an anti-pattern.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSessionId(id);
+    fetchHistory(id).then((turns) => {
+      if (turns.length === 0) return;
+      const restored: Message[] = turns.flatMap((t) => [
+        { id: crypto.randomUUID(), role: "user" as const, content: t.question },
+        { id: crypto.randomUUID(), role: "assistant" as const, content: t.answer },
+      ]);
+      setMessages(restored);
+    });
+    refreshConversations();
+  }, [refreshConversations]);
 
   const send = useCallback(
     async (query: string) => {
@@ -32,7 +68,8 @@ export function useChat() {
         await queryStream(
           query,
           company || null,
-          (sources, rationale) => {
+          sessionId,
+          (sources: string[], rationale: string) => {
             setMessages((prev) =>
               prev.map((m) =>
                 m.id === assistantId
@@ -65,6 +102,9 @@ export function useChat() {
             );
           }
         );
+        // A brand-new conversation needs to appear in the sidebar, and an
+        // existing one's recency should bump to the top.
+        refreshConversations();
       } catch {
         setMessages((prev) =>
           prev.map((m) =>
@@ -82,7 +122,7 @@ export function useChat() {
         setLoading(false);
       }
     },
-    [company]
+    [company, sessionId, refreshConversations]
   );
 
   const feedback = useCallback(
@@ -92,5 +132,44 @@ export function useChat() {
     []
   );
 
-  return { messages, loading, company, setCompany, send, feedback };
+  const switchConversation = useCallback(async (id: string) => {
+    setActiveSessionId(id);
+    setSessionId(id);
+    const turns = await fetchHistory(id);
+    const restored: Message[] = turns.flatMap((t) => [
+      { id: crypto.randomUUID(), role: "user" as const, content: t.question },
+      { id: crypto.randomUUID(), role: "assistant" as const, content: t.answer },
+    ]);
+    setMessages(restored);
+  }, []);
+
+  const startNewConversation = useCallback(() => {
+    const id = crypto.randomUUID();
+    setActiveSessionId(id);
+    setSessionId(id);
+    setMessages([]);
+  }, []);
+
+  const deleteConversation = useCallback(
+    async (id: string) => {
+      await deleteHistory(id);
+      setConversations((prev) => prev.filter((c) => c.session_id !== id));
+      if (id === sessionId) startNewConversation();
+    },
+    [sessionId, startNewConversation]
+  );
+
+  return {
+    messages,
+    loading,
+    company,
+    setCompany,
+    send,
+    feedback,
+    conversations,
+    activeSessionId: sessionId,
+    switchConversation,
+    startNewConversation,
+    deleteConversation,
+  };
 }

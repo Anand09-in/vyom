@@ -64,7 +64,10 @@ You have access to three data sources:
 - RBI data: repo rate, CPI inflation, credit growth, forex, monetary policy
 
 Rules you must follow:
-1. Answer ONLY from the retrieved context provided below. Never use prior knowledge.
+1. Answer ONLY from the retrieved context provided below. Never use prior/
+   outside knowledge you weren't given here. The ongoing conversation
+   (if any) is not "outside knowledge" — you may use it for continuity,
+   but every factual claim must still be grounded in the retrieved context.
 2. Every factual claim must cite its source using the exact tag shown at
    the start of that chunk's context, e.g. [BSE:1042], [SEBI:317],
    [RBI:REPO_RATE:2025-Q2]. Copy the tag exactly as given — for RBI this
@@ -85,9 +88,11 @@ Rules you must follow:
 # ── State definition ───────────────────────────────────────────────────────────
 
 class VyomState(TypedDict):
-    query: str
+    query: str                     # raw, as typed by the user — never mutated
+    standalone_query: str          # query resolved against history (== query when there's no history)
     rewritten_query: str
     company: str | None            # optional ticker/company name filter
+    history_recent: list[dict]     # prior {question, answer} turns, oldest first, capped by caller
     route: RouteDecision | None
     filing_chunks: list[FilingChunk]
     circular_chunks: list[CircularChunk]
@@ -120,32 +125,64 @@ def build_pipeline(
     # ── Node 1: classify_and_rewrite ──────────────────────────────────────────
     async def classify_and_rewrite(state: VyomState) -> VyomState:
         """
-        Two jobs in one node:
-        1. Route the query to the right source(s) using keyword signals.
-        2. HyDE (Hypothetical Document Embedding) — generate a short hypothetical
-           answer and append it to the query. This enriches the embedding so
-           retrieval finds more relevant chunks.
+        Three jobs in one node:
+        1. If there's prior conversation history, condense the (possibly
+           context-dependent) raw query into a standalone question first —
+           so a follow-up like "what about last year?" gets resolved into
+           something routing and retrieval can actually work with, instead
+           of only the final generation step understanding the reference.
+        2. Route the (standalone) query to the right source(s) using
+           keyword signals.
+        3. HyDE (Hypothetical Document Embedding) — generate a short
+           hypothetical answer and append it to the query. This enriches
+           the embedding so retrieval finds more relevant chunks.
         """
-        decision = route(state["query"], enabled_sources)
+        standalone_query = state["query"]
+        history = state.get("history_recent") or []
 
-        # HyDE: generate a hypothetical answer for better embedding.
-        # provider.generate() is a blocking network call — offload it so it
-        # doesn't freeze the server's event loop for every other request.
+        if history:
+            history_block = "\n".join(
+                f"Q: {t['question']}\nA: {t['answer']}" for t in history
+            )
+            # Condense the follow-up before routing/retrieval touch it.
+            # provider.generate() is a blocking network call — offload it.
+            condensed = await asyncio.to_thread(
+                provider.generate,
+                f"Conversation so far:\n{history_block}\n\n"
+                f"Follow-up question: {state['query']}\n\n"
+                "Rewrite the follow-up question as a standalone question "
+                "that makes sense without the conversation above — resolve "
+                "any pronouns or implicit references (e.g. \"that company\", "
+                "\"last year\") using the conversation. If the follow-up is "
+                "already standalone, return it unchanged. Reply with ONLY "
+                "the rewritten question, nothing else.",
+                system=(
+                    "You rewrite follow-up questions into standalone "
+                    "questions for an Indian financial data retrieval "
+                    "system. Be concise and preserve the original intent "
+                    "exactly."
+                ),
+            )
+            standalone_query = condensed.strip().strip('"')
+
+        decision = route(standalone_query, enabled_sources)
+
         hyp = await asyncio.to_thread(
             provider.generate,
             f"Write one short paragraph that would answer this question about "
-            f"an Indian company or financial regulation: {state['query']}",
+            f"an Indian company or financial regulation: {standalone_query}",
             system=(
                 "Be concise (2-3 sentences). Use Indian financial terminology "
                 "where relevant. Do not make up specific numbers."
             ),
         )
 
-        rewritten = f"{state['query']} {hyp[:400]}"
+        rewritten = f"{standalone_query} {hyp[:400]}"
 
         return {
             **state,
             "route": decision,
+            "standalone_query": standalone_query,
             "rewritten_query": rewritten,
         }
 
@@ -178,7 +215,7 @@ def build_pipeline(
             if raw:
                 texts = [c.content for c in raw]
                 ranked = await asyncio.to_thread(
-                    provider.rerank, state["query"], texts, top_n=rerank_top_n
+                    provider.rerank, state["standalone_query"], texts, top_n=rerank_top_n
                 )
                 filing_chunks = [raw[r.index] for r in ranked]
 
@@ -191,7 +228,7 @@ def build_pipeline(
             if raw_s:
                 texts = [c.content for c in raw_s]
                 ranked = await asyncio.to_thread(
-                    provider.rerank, state["query"], texts, top_n=rerank_top_n
+                    provider.rerank, state["standalone_query"], texts, top_n=rerank_top_n
                 )
                 circular_chunks = [raw_s[r.index] for r in ranked]
 
@@ -204,7 +241,7 @@ def build_pipeline(
             if raw_r:
                 texts = [c.content for c in raw_r]
                 ranked = await asyncio.to_thread(
-                    provider.rerank, state["query"], texts, top_n=min(rerank_top_n, 3)
+                    provider.rerank, state["standalone_query"], texts, top_n=min(rerank_top_n, 3)
                 )
                 rbi_chunks = [raw_r[r.index] for r in ranked]
 
@@ -317,7 +354,17 @@ def build_pipeline(
         context = "\n\n".join(context_parts)
         sources_label = " + ".join(s.upper() for s in state["sources_used"])
 
+        history = state.get("history_recent") or []
+        history_block = (
+            "Conversation so far:\n"
+            + "\n".join(f"Q: {t['question']}\nA: {t['answer']}" for t in history)
+            + "\n\n"
+            if history
+            else ""
+        )
+
         prompt = (
+            f"{history_block}"
             f"Sources available: {sources_label}\n\n"
             f"Context:\n{context}\n\n"
             f"Question: {state['query']}\n\n"

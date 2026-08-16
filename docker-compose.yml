@@ -18,6 +18,20 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: vyom-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - vyom_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   mlflow:
     image: ghcr.io/mlflow/mlflow:latest
     container_name: vyom-mlflow
@@ -30,3 +44,4 @@ services:
 volumes:
   vyom_pgdata:
   vyom_mlflow:
+  vyom_redis:

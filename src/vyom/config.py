@@ -32,6 +32,15 @@ class Settings(BaseSettings):
     db_pool_max: int = 10
     embedding_dim: int = 512
 
+    # ── Conversation history (Redis) ─────────────────────────────────────────
+    # Storage is unbounded — every turn is kept until a client explicitly
+    # deletes it (no TTL, per design choice: better an explicit "New
+    # conversation" action than a silent, surprising expiry). Only the last
+    # history_recent_turns are ever sliced off and sent to the LLM (for query
+    # condensation and the final generation prompt) — see store/history.py.
+    redis_url: str = "redis://localhost:6379/0"
+    history_recent_turns: int = 5
+
     # ── Local provider (free dev) ─────────────────────────────────────────────
     # nomic-embed-text-v1.5: English, 8192-token context (our chunker's
     # 512-word chunks exceeded MiniLM's 256-token limit and were being

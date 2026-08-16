@@ -71,13 +71,98 @@ async def _run_pipeline_on_question(
     return result
 
 
+async def _run_conversation_through_pipeline(
+    turns: list[dict],
+    company: str | None,
+    sources: list[str],
+    pipeline,
+) -> list[dict]:
+    """
+    Run a multi-turn conversation through the pipeline sequentially,
+    exercising the same history_recent-driven query condensation that
+    /query and /query/stream use for real follow-up questions (see
+    classify_and_rewrite in pipeline.py).
+
+    Deliberately in-memory only: history_recent is built up locally from
+    each turn's ACTUAL pipeline answer (not the golden ground truth,
+    matching what happens in production), and never touches HistoryStore
+    or Redis — eval runs must not pollute the real conversation history
+    or show up in the sidebar's "recent conversations" list.
+
+    Returns one flat record per turn (same shape as single-turn records),
+    so a conversation's turns each contribute independently to the RAGAS
+    dataset — the interesting signal is on follow-up turns specifically,
+    where a correct score means the pipeline actually resolved the
+    conversational reference (pronouns, implicit company/topic) rather
+    than just answering the raw text in isolation.
+    """
+    from vyom.retrieve.pipeline import VyomState
+    from vyom.retrieve.router import route
+
+    enabled = sources if sources else ["bse", "sebi", "rbi", "cross"]
+    history_recent: list[dict] = []
+    records: list[dict] = []
+
+    for turn in turns:
+        question = turn["question"]
+        ground_truth = turn["answer"]
+        decision = route(question, enabled)
+
+        initial = VyomState(
+            query=question,
+            standalone_query=question,
+            rewritten_query=question,
+            company=company,
+            history_recent=list(history_recent),
+            route=decision,
+            filing_chunks=[],
+            circular_chunks=[],
+            rbi_chunks=[],
+            answer="",
+            citations=[],
+            sources_used=[],
+            loop_count=0,
+            tokens_used=0,
+            latency_ms=0,
+        )
+
+        try:
+            result = await pipeline.ainvoke(initial)
+            answer = result.get("answer", "")
+            contexts = (
+                [c.content for c in result.get("filing_chunks", [])]
+                + [c.content for c in result.get("circular_chunks", [])]
+                + [c.content for c in result.get("rbi_chunks", [])]
+            )
+        except Exception as exc:
+            logger.error("Pipeline error on multi-turn question %r: %s", question, exc)
+            answer = "Error: pipeline failed."
+            contexts = ["No context retrieved."]
+
+        records.append({
+            "question":     question,
+            "answer":       answer,
+            "contexts":     contexts if contexts else ["No context retrieved."],
+            "ground_truth": ground_truth,
+        })
+
+        # Feed the real answer forward, not the ground truth — history_recent
+        # in production is built from what the model actually said.
+        history_recent.append({"question": question, "answer": answer})
+
+    return records
+
+
 async def _build_eval_dataset(
     golden: list[dict],
     settings,
+    golden_multiturn: list[dict] | None = None,
 ) -> list[dict]:
     """
-    Run every golden question through the pipeline.
-    Returns a list of dicts with question, answer, contexts, ground_truth.
+    Run every golden question (and, if given, every multi-turn conversation)
+    through the pipeline. Returns a flat list of dicts with question,
+    answer, contexts, ground_truth — one per single-turn question or per
+    conversation turn.
     """
     from vyom.store.repo import create_pool, Repository
     from vyom.providers import get_provider
@@ -136,6 +221,19 @@ async def _build_eval_dataset(
                 "contexts":     ["No context retrieved."],
                 "ground_truth": ground_truth,
             })
+
+    for i, convo in enumerate(golden_multiturn or []):
+        turns   = convo["turns"]
+        company = convo.get("company")
+        sources = convo.get("sources", [])
+
+        logger.info(
+            "[multi-turn %d/%d] %d turns, starting: %s",
+            i + 1, len(golden_multiturn), len(turns), turns[0]["question"][:60],
+        )
+        records.extend(
+            await _run_conversation_through_pipeline(turns, company, sources, pipeline)
+        )
 
     await pool.close()
     return records
@@ -256,10 +354,12 @@ def _log_to_mlflow(metrics: dict, experiment: str, golden_path: str, out_path: s
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Vyom RAGAS evaluation harness")
-    parser.add_argument("--golden",     default="eval/golden.jsonl",  help="Path to golden Q&A file")
+    parser.add_argument("--golden",           default="eval/golden.jsonl",           help="Path to golden Q&A file")
+    parser.add_argument("--golden-multiturn", default="eval/golden_multiturn.jsonl", help="Path to multi-turn conversation golden file (optional — skipped if missing)")
+    parser.add_argument("--no-multiturn",     action="store_true",                   help="Skip multi-turn conversations even if the file exists")
     parser.add_argument("--out",        default="eval/results.json",  help="Path to write results JSON")
     parser.add_argument("--experiment", default="vyom-eval",          help="MLflow experiment name")
-    parser.add_argument("--questions",  type=int, default=None,       help="Limit to first N questions (for quick testing)")
+    parser.add_argument("--questions",  type=int, default=None,       help="Limit to first N single-turn questions (for quick testing)")
     args = parser.parse_args()
 
     # Load golden set
@@ -280,12 +380,32 @@ def main() -> None:
 
     logger.info("Loaded %d questions from %s", len(golden), golden_path)
 
+    # Load multi-turn conversations — optional, skipped if the file is
+    # absent (unlike --golden, which is required). Kept entirely separate
+    # from --questions' slicing since a conversation isn't a single item.
+    golden_multiturn: list[dict] = []
+    if not args.no_multiturn:
+        mt_path = Path(args.golden_multiturn)
+        if mt_path.exists():
+            golden_multiturn = [
+                json.loads(line)
+                for line in mt_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            num_turns = sum(len(c["turns"]) for c in golden_multiturn)
+            logger.info(
+                "Loaded %d multi-turn conversations (%d turns total) from %s",
+                len(golden_multiturn), num_turns, mt_path,
+            )
+        else:
+            logger.info("No multi-turn golden file at %s — skipping", mt_path)
+
     # Load settings
     from vyom.config import get_settings
     settings = get_settings()
 
     # Run pipeline on all questions
-    records = asyncio.run(_build_eval_dataset(golden, settings))
+    records = asyncio.run(_build_eval_dataset(golden, settings, golden_multiturn))
 
     # Add question count to metrics later
     num_questions = len(records)

@@ -66,3 +66,9 @@ Hybrid search over-fetches (`top_k`, default 20) because RRF is a cheap, approxi
 ## Deployment: one app, two entrypoints
 
 The FastAPI `app` object in [app.py](../src/vyom/api/app.py) is created once and reused. Locally, `uvicorn` serves it directly (with a lifespan hook that opens the DB pool on startup). On AWS, [lambda_handler.py](../src/vyom/api/lambda_handler.py) wraps the exact same `app` with Mangum, which translates Lambda Function URL events to ASGI and back — `lifespan="off"` because Lambda manages the process lifecycle itself, so the DB pool is instead opened lazily on first request (see `get_pool()` in [deps.py](../src/vyom/api/deps.py)).
+
+**Running locally on Windows**: plain `uvicorn src.vyom.api.app:app --host 0.0.0.0 --port 8000` hangs forever on every DB query — psycopg's async pool refuses to run on `ProactorEventLoop`, and uvicorn 0.40 hardcodes exactly that as its Windows default (`uvicorn/loops/asyncio.py`) *unless* `--reload` or `--workers >1` is set (their code path passes `use_subprocess=True`, which picks `SelectorEventLoop` instead). Setting `asyncio.set_event_loop_policy(...)` at import time — the fix already used in every ingest script's `__main__` guard — does **not** work here, because uvicorn calls `asyncio.run(..., loop_factory=self.config.get_loop_factory())`, which constructs the loop directly and ignores the global policy entirely. The actual fix is forcing the loop class via uvicorn's own `--loop` flag:
+```
+uvicorn src.vyom.api.app:app --host 0.0.0.0 --port 8000 --loop asyncio:SelectorEventLoop
+```
+`--loop` accepts a `module:attribute` import path, not just the built-in `auto`/`asyncio`/`uvloop` aliases — `asyncio:SelectorEventLoop` points straight at the stdlib class, sidestepping the Windows default without needing `--reload`.

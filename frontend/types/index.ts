@@ -29,4 +29,15 @@ export interface QueryResponse {
   route_rationale: string;
   latency_ms: number;
   query_log_id: number;
+  session_id: string;
+}
+
+export interface HistoryTurn {
+  question: string;
+  answer: string;
+}
+
+export interface ConversationSummary {
+  session_id: string;
+  title: string;
 }

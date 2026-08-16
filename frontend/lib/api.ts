@@ -1,20 +1,44 @@
+import { ConversationSummary, HistoryTurn } from "@/types";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const SESSION_KEY = "vyom_session_id";
+
+/** Reads the persisted session id, or mints and persists a new one.
+ * localStorage (not sessionStorage) so conversation memory survives a
+ * browser refresh, not just the current tab's lifetime. */
+export function getOrCreateSessionId(): string {
+  let id = localStorage.getItem(SESSION_KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(SESSION_KEY, id);
+  }
+  return id;
+}
+
+/** Sets the active session id explicitly — used when switching to or
+ * starting a conversation, as opposed to getOrCreateSessionId's lazy
+ * read-or-mint behavior. */
+export function setActiveSessionId(id: string): void {
+  localStorage.setItem(SESSION_KEY, id);
+}
 
 export async function queryStream(
   query: string,
   company: string | null,
+  sessionId: string,
   onRoute: (sources: string[], rationale: string) => void,
   onToken: (token: string) => void,
   onDone: (data: {
     citations: object[];
     sources_used: string[];
     latency_ms: number;
+    session_id: string;
   }) => void
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/query/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ query, company: company || null }),
+    body: JSON.stringify({ query, company: company || null, session_id: sessionId }),
   });
 
   if (!res.ok) throw new Error(`API error ${res.status}`);
@@ -46,12 +70,32 @@ export async function queryStream(
         const parsed = JSON.parse(raw);
         onRoute(parsed.sources ?? [], parsed.rationale);
       } else if (currentEvent === "done") {
-        onDone(JSON.parse(raw));
+        const parsed = JSON.parse(raw);
+        if (parsed.session_id) setActiveSessionId(parsed.session_id);
+        onDone(parsed);
       } else if (currentEvent === "token") {
         onToken(JSON.parse(raw));
       }
     }
   }
+}
+
+export async function fetchHistory(sessionId: string): Promise<HistoryTurn[]> {
+  const res = await fetch(`${API_BASE}/query/history/${sessionId}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.turns ?? [];
+}
+
+export async function deleteHistory(sessionId: string): Promise<void> {
+  await fetch(`${API_BASE}/query/history/${sessionId}`, { method: "DELETE" });
+}
+
+export async function fetchConversations(): Promise<ConversationSummary[]> {
+  const res = await fetch(`${API_BASE}/query/conversations`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.conversations ?? [];
 }
 
 export async function submitFeedback(
