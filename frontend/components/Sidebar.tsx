@@ -1,4 +1,5 @@
 "use client";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ConversationSummary } from "@/types";
 
 interface Props {
@@ -9,9 +10,69 @@ interface Props {
   onDelete: (sessionId: string) => void;
 }
 
+const WIDTH_KEY = "vyom_sidebar_width";
+const MIN_WIDTH = 200;
+const MAX_WIDTH = 480;
+const DEFAULT_WIDTH = 256; // matches the old fixed w-64
+
 export function Sidebar({ conversations, activeSessionId, onSelect, onNew, onDelete }: Props) {
+  const [width, setWidth] = useState(DEFAULT_WIDTH);
+  const [resizing, setResizing] = useState(false);
+  const asideRef = useRef<HTMLElement>(null);
+
+  // Width is inherently client-only (localStorage) — same reasoning as
+  // useChat's session id: a lazy useState initializer would risk a
+  // server/client hydration mismatch, so read it in an effect instead.
+  useEffect(() => {
+    const stored = Number(localStorage.getItem(WIDTH_KEY));
+    if (stored >= MIN_WIDTH && stored <= MAX_WIDTH) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setWidth(stored);
+    }
+  }, []);
+
+  const startResize = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    setResizing(true);
+  }, []);
+
+  useEffect(() => {
+    if (!resizing) return;
+
+    const prevCursor = document.body.style.cursor;
+    const prevSelect = document.body.style.userSelect;
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+
+    const onMove = (e: PointerEvent) => {
+      const left = asideRef.current?.getBoundingClientRect().left ?? 0;
+      const next = Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, e.clientX - left));
+      setWidth(next);
+    };
+    const onUp = () => {
+      setResizing(false);
+      setWidth((w) => {
+        localStorage.setItem(WIDTH_KEY, String(w));
+        return w;
+      });
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      document.body.style.cursor = prevCursor;
+      document.body.style.userSelect = prevSelect;
+    };
+  }, [resizing]);
+
   return (
-    <aside className="w-64 shrink-0 h-screen bg-gray-50 border-r border-gray-100 flex flex-col">
+    <aside
+      ref={asideRef}
+      style={{ width }}
+      className="relative shrink-0 h-screen bg-gray-50 border-r border-gray-100 flex flex-col"
+    >
       <div className="p-3">
         <button
           onClick={onNew}
@@ -57,6 +118,23 @@ export function Sidebar({ conversations, activeSessionId, onSelect, onNew, onDel
           </ul>
         )}
       </nav>
+
+      {/* Drag handle — resizes the sidebar, width persists across reloads */}
+      <div
+        onPointerDown={startResize}
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize sidebar"
+        className={`absolute top-0 right-0 h-full w-1.5 -mr-0.5 cursor-col-resize group ${
+          resizing ? "select-none" : ""
+        }`}
+      >
+        <div
+          className={`h-full w-px mx-auto transition-colors ${
+            resizing ? "bg-blue-400 w-0.5" : "bg-transparent group-hover:bg-blue-300"
+          }`}
+        />
+      </div>
     </aside>
   );
 }

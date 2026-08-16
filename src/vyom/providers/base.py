@@ -18,6 +18,20 @@ class RerankResult:
     score: float
 
 
+class GuardrailBlocked(Exception):
+    """Raised by generate() when a guardrail intervenes on the full
+    constructed prompt (context + history + question) — distinct from
+    check_guardrail(), which screens the raw query before retrieval ever
+    runs. Callers that already retrieved real chunks before hitting this
+    (i.e. anyone catching it around the final answer-generation call)
+    should discard those citations along with the answer — they were
+    never actually used in the text this exception carries."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 class Provider(ABC):
     """Abstract backend for the three model operations RAG needs."""
 
@@ -46,3 +60,20 @@ class Provider(ABC):
         top_n: int | None = None,
     ) -> list[RerankResult]:
         """Score documents against the query. Returns them sorted best-first."""
+
+    def check_guardrail(self, text: str) -> str | None:
+        """Fast up-front check on raw user input, before any retrieval work
+        runs. Returns a block message if the input should be rejected
+        outright, or None if it's fine to proceed.
+
+        Deliberately separate from the guardrailConfig already applied
+        inside generate()/stream() — that one screens the *full* constructed
+        prompt (retrieved context + history + question) right before the
+        final LLM call, which is necessary but happens only after retrieval
+        has already spent its embedding/search/rerank work. This one runs
+        first, on the raw query alone, so an obvious injection attempt gets
+        rejected without paying for retrieval at all. Default: no-op (never
+        blocks) — only BedrockProvider actually implements a check, since
+        Guardrails is a Bedrock-specific feature.
+        """
+        return None

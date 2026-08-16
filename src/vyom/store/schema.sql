@@ -121,6 +121,7 @@ CREATE INDEX IF NOT EXISTS rbi_obs_date
 
 CREATE TABLE IF NOT EXISTS query_log (
     id               BIGSERIAL    PRIMARY KEY,
+    user_id          TEXT,                       -- Cognito `sub` — see api/auth.py
     session_id       TEXT,
     query            TEXT         NOT NULL,
     rewritten_query  TEXT,

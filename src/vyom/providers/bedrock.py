@@ -24,7 +24,7 @@ from collections.abc import Iterator
 from functools import cached_property
 
 from vyom.config import Settings
-from vyom.providers.base import Provider, RerankResult
+from vyom.providers.base import GuardrailBlocked, Provider, RerankResult
 from vyom.providers.local import LocalProvider
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,45 @@ class BedrockProvider(Provider):
     def _local(self) -> LocalProvider:
         return LocalProvider(self._s)
 
+    def _guardrail_config(self) -> dict | None:
+        """Prompt-injection / off-topic defense on generation only — see
+        infra/main.tf's aws_bedrock_guardrail.vyom. Enforced by Bedrock
+        itself via the Converse API, not a code-level filter here. None if
+        no guardrail is configured (e.g. running without infra applied)."""
+        if not self._s.bedrock_guardrail_id:
+            return None
+        return {
+            "guardrailIdentifier": self._s.bedrock_guardrail_id,
+            "guardrailVersion": self._s.bedrock_guardrail_version,
+            "trace": "enabled",
+        }
+
+    def check_guardrail(self, text: str) -> str | None:
+        """Fast up-front check via Bedrock's standalone ApplyGuardrail API —
+        runs on the raw query alone, before retrieval, so an obvious
+        injection attempt is rejected without paying for embedding/search/
+        rerank/HyDE first. See Provider.check_guardrail's docstring for why
+        this is separate from generate()'s guardrailConfig."""
+        guardrail = self._guardrail_config()
+        if not guardrail:
+            return None
+        resp = self._runtime.apply_guardrail(
+            guardrailIdentifier=guardrail["guardrailIdentifier"],
+            guardrailVersion=guardrail["guardrailVersion"],
+            source="INPUT",
+            content=[{"text": {"text": text}}],
+        )
+        if resp.get("action") == "GUARDRAIL_INTERVENED":
+            outputs = resp.get("outputs", [])
+            if outputs:
+                return outputs[0]["text"]
+            return (
+                "This request can't be processed — it looks like an attempt "
+                "to override Vyom's instructions rather than a genuine "
+                "question about Indian financial or regulatory data."
+            )
+        return None
+
     def embed(self, texts: list[str]) -> list[list[float]]:
         return self._local.embed(texts)
 
@@ -51,22 +90,35 @@ class BedrockProvider(Provider):
         return self._local.embed_query(text)
 
     def generate(self, prompt: str, *, system: str | None = None) -> str:
+        guardrail = self._guardrail_config()
         resp = self._runtime.converse(
             modelId=self._s.bedrock_gen_model,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
             system=[{"text": system}] if system else [],
+            **({"guardrailConfig": guardrail} if guardrail else {}),
         )
-        return resp["output"]["message"]["content"][0]["text"]
+        text = resp["output"]["message"]["content"][0]["text"]
+        if resp.get("stopReason") == "guardrail_intervened":
+            logger.warning(
+                "Bedrock Guardrails intervened on a generate() call. Trace: %s\nPrompt was: %s",
+                resp.get("trace"), prompt[:3000],
+            )
+            raise GuardrailBlocked(text)
+        return text
 
     def stream(self, prompt: str, *, system: str | None = None) -> Iterator[str]:
+        guardrail = self._guardrail_config()
         resp = self._runtime.converse_stream(
             modelId=self._s.bedrock_gen_model,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
             system=[{"text": system}] if system else [],
+            **({"guardrailConfig": guardrail} if guardrail else {}),
         )
         for event in resp["stream"]:
             if "contentBlockDelta" in event:
                 yield event["contentBlockDelta"]["delta"]["text"]
+            if event.get("messageStop", {}).get("stopReason") == "guardrail_intervened":
+                logger.warning("Bedrock Guardrails intervened on a stream() call")
 
     def rerank(
         self,

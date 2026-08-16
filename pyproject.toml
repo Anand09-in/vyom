@@ -33,6 +33,7 @@ api = [
     "mangum>=0.17",
     "sse-starlette>=2.1",
     "slowapi>=0.1.9",
+    "python-jose[cryptography]>=3.3",
 ]
 mcp = [
     "mcp>=1.0",

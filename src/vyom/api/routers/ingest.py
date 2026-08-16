@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
 
+from vyom.api.auth import get_current_user
 from vyom.config import get_settings
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/ingest", tags=["ingest"])
+router = APIRouter(prefix="/ingest", tags=["ingest"], dependencies=[Depends(get_current_user)])
 
 # Default Nifty 50 company list
 NIFTY_50 = [

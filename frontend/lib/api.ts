@@ -1,7 +1,16 @@
 import { ConversationSummary, HistoryTurn } from "@/types";
+import { getIdToken } from "@/lib/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const SESSION_KEY = "vyom_session_id";
+
+/** Every Vyom endpoint except /health requires a Cognito ID token — see
+ * api/auth.py. Returns {} (no header) if there's no signed-in session,
+ * which the backend will correctly reject with 401 rather than crash on. */
+async function authHeaders(): Promise<Record<string, string>> {
+  const token = await getIdToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 
 /** Reads the persisted session id, or mints and persists a new one.
  * localStorage (not sessionStorage) so conversation memory survives a
@@ -37,7 +46,7 @@ export async function queryStream(
 ): Promise<void> {
   const res = await fetch(`${API_BASE}/query/stream`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ query, company: company || null, session_id: sessionId }),
   });
 
@@ -81,18 +90,25 @@ export async function queryStream(
 }
 
 export async function fetchHistory(sessionId: string): Promise<HistoryTurn[]> {
-  const res = await fetch(`${API_BASE}/query/history/${sessionId}`);
+  const res = await fetch(`${API_BASE}/query/history/${sessionId}`, {
+    headers: await authHeaders(),
+  });
   if (!res.ok) return [];
   const data = await res.json();
   return data.turns ?? [];
 }
 
 export async function deleteHistory(sessionId: string): Promise<void> {
-  await fetch(`${API_BASE}/query/history/${sessionId}`, { method: "DELETE" });
+  await fetch(`${API_BASE}/query/history/${sessionId}`, {
+    method: "DELETE",
+    headers: await authHeaders(),
+  });
 }
 
 export async function fetchConversations(): Promise<ConversationSummary[]> {
-  const res = await fetch(`${API_BASE}/query/conversations`);
+  const res = await fetch(`${API_BASE}/query/conversations`, {
+    headers: await authHeaders(),
+  });
   if (!res.ok) return [];
   const data = await res.json();
   return data.conversations ?? [];
@@ -105,7 +121,7 @@ export async function submitFeedback(
 ): Promise<void> {
   await fetch(`${API_BASE}/feedback`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
     body: JSON.stringify({ query_log_id, rating, comment }),
   });
 }

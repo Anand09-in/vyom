@@ -63,6 +63,20 @@ class Settings(BaseSettings):
     # output from its own model family. Works on-demand, no inference profile
     # needed, 100 RPM / 100M TPM quota (Llama 3 70B's ~4 RPM throttled heavily).
     bedrock_gen_model: str = "mistral.mistral-large-3-675b-instruct"
+    # Prompt-injection / off-topic defense on generation calls only — see
+    # infra/main.tf's aws_bedrock_guardrail.vyom. Applied via the Converse
+    # API's guardrailConfig, not a code-level filter, so it's enforced
+    # server-side by Bedrock regardless of what BedrockProvider does.
+    bedrock_guardrail_id: str = ""
+    bedrock_guardrail_version: str = "1"
+
+    # ── Auth (Cognito) ─────────────────────────────────────────────────────────
+    # Every route except /health requires a valid Cognito-issued JWT — see
+    # api/deps.py's get_current_user. Values come from infra/main.tf's
+    # outputs after `terraform apply` (cognito_user_pool_id, etc.).
+    cognito_user_pool_id: str = ""
+    cognito_app_client_id: str = ""
+    cognito_issuer_url: str = ""
 
     # ── Data sources ──────────────────────────────────────────────────────────
     bse_download_folder: str = "./data/bse"

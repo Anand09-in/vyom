@@ -151,10 +151,13 @@ export function useChat() {
   }, []);
 
   const deleteConversation = useCallback(
-    async (id: string) => {
-      await deleteHistory(id);
+    (id: string) => {
+      // Update the sidebar instantly — don't wait on the network round trip
+      // before removing it from view. The DELETE call still fires and
+      // completes in the background.
       setConversations((prev) => prev.filter((c) => c.session_id !== id));
       if (id === sessionId) startNewConversation();
+      deleteHistory(id);
     },
     [sessionId, startNewConversation]
   );

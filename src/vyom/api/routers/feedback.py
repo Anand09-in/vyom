@@ -9,9 +9,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from vyom.api.auth import get_current_user
 from vyom.api.deps import get_repo
 
-router = APIRouter(prefix="/feedback", tags=["feedback"])
+router = APIRouter(prefix="/feedback", tags=["feedback"], dependencies=[Depends(get_current_user)])
 
 
 class FeedbackRequest(BaseModel):

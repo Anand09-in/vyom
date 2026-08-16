@@ -1,11 +1,15 @@
 "use client";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { useChat } from "@/hooks/useChat";
 import { MessageBubble } from "@/components/MessageBubble";
 import { ChatInput } from "@/components/ChatInput";
 import { Sidebar } from "@/components/Sidebar";
+import { isSignedIn, signOut } from "@/lib/auth";
 
 export default function Home() {
+  const router = useRouter();
+  const [authChecked, setAuthChecked] = useState(false);
   const {
     messages,
     loading,
@@ -21,8 +25,22 @@ export default function Home() {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    isSignedIn().then((ok) => {
+      if (!ok) router.push("/login");
+      else setAuthChecked(true);
+    });
+  }, [router]);
+
+  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  const handleSignOut = async () => {
+    await signOut();
+    router.push("/login");
+  };
+
+  if (!authChecked) return null;
 
   return (
     <div className="flex h-screen bg-gray-50">
@@ -60,6 +78,12 @@ export default function Home() {
             >
               API docs
             </a>
+            <button
+              onClick={handleSignOut}
+              className="text-xs text-gray-400 hover:text-blue-600 transition-colors"
+            >
+              Sign out
+            </button>
           </div>
         </header>
 

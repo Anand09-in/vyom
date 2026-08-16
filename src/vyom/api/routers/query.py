@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
+from vyom.api.auth import CurrentUser, get_current_user
 from vyom.api.deps import get_history_store, get_provider_dep, get_repo
 from vyom.config import get_settings
 from vyom.retrieve.pipeline import VyomState, build_pipeline
@@ -32,7 +33,7 @@ from vyom.retrieve.router import route
 from vyom.store.history import HistoryStore, Turn
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/query", tags=["query"])
+router = APIRouter(prefix="/query", tags=["query"], dependencies=[Depends(get_current_user)])
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -97,9 +98,9 @@ def _resolve_session_id(req: QueryRequest) -> str:
 
 
 async def _make_initial_state(
-    req: QueryRequest, session_id: str, history_store: HistoryStore, settings
+    req: QueryRequest, user_id: str, session_id: str, history_store: HistoryStore, settings
 ) -> VyomState:
-    recent = await history_store.get_recent(session_id, settings.history_recent_turns)
+    recent = await history_store.get_recent(user_id, session_id, settings.history_recent_turns)
     return VyomState(
         query=req.query,
         standalone_query=req.query,
@@ -127,10 +128,41 @@ async def query(
     repo=Depends(get_repo),
     provider=Depends(get_provider_dep),
     history_store: HistoryStore = Depends(get_history_store),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> QueryResponse:
     settings = get_settings()
     enabled = req.sources or settings.sources
     session_id = _resolve_session_id(req)
+
+    t0 = time.monotonic()
+
+    # Fast up-front check on the raw query, before any retrieval work runs —
+    # an obvious injection attempt gets rejected without paying for
+    # embedding/search/rerank/HyDE first. See Provider.check_guardrail.
+    block_message = await asyncio.to_thread(provider.check_guardrail, req.query)
+    if block_message is not None:
+        latency = int((time.monotonic() - t0) * 1000)
+        log_id = await repo.log_query(
+            user_id=current_user.user_id,
+            session_id=session_id,
+            query=req.query,
+            rewritten_query=None,
+            sources_used=[],
+            chunks_retrieved=0,
+            latency_ms=latency,
+            tokens_used=0,
+            provider=settings.provider,
+        )
+        await history_store.append(current_user.user_id, session_id, req.query, block_message)
+        return QueryResponse(
+            answer=block_message,
+            citations=[],
+            sources_used=[],
+            route_rationale="Blocked by input guardrail",
+            latency_ms=latency,
+            query_log_id=log_id,
+            session_id=session_id,
+        )
 
     pipeline = build_pipeline(
         provider=provider,
@@ -141,9 +173,10 @@ async def query(
         enabled_sources=enabled,
     )
 
-    t0 = time.monotonic()
     try:
-        initial_state = await _make_initial_state(req, session_id, history_store, settings)
+        initial_state = await _make_initial_state(
+            req, current_user.user_id, session_id, history_store, settings
+        )
         result = await pipeline.ainvoke(initial_state)
     except Exception as exc:
         logger.exception("Pipeline error for query: %s", req.query)
@@ -153,6 +186,7 @@ async def query(
     decision = result["route"]
 
     log_id = await repo.log_query(
+        user_id=current_user.user_id,
         session_id=session_id,
         query=req.query,
         rewritten_query=result.get("rewritten_query"),
@@ -167,7 +201,7 @@ async def query(
         provider=settings.provider,
     )
 
-    await history_store.append(session_id, req.query, result["answer"])
+    await history_store.append(current_user.user_id, session_id, req.query, result["answer"])
 
     return QueryResponse(
         answer=result["answer"],
@@ -188,6 +222,7 @@ async def query_stream(
     repo=Depends(get_repo),
     provider=Depends(get_provider_dep),
     history_store: HistoryStore = Depends(get_history_store),
+    current_user: CurrentUser = Depends(get_current_user),
 ):
     """
     SSE streaming endpoint.
@@ -201,6 +236,30 @@ async def query_stream(
     session_id = _resolve_session_id(req)
 
     async def event_generator() -> AsyncIterator[dict]:
+        t0 = time.monotonic()
+
+        # Fast up-front check on the raw query, before any retrieval work
+        # runs or the "route" preview is even emitted — see
+        # Provider.check_guardrail and the /query handler above.
+        block_message = await asyncio.to_thread(provider.check_guardrail, req.query)
+        if block_message is not None:
+            yield {
+                "event": "route",
+                "data": json.dumps({"sources": [], "rationale": "Blocked by input guardrail"}),
+            }
+            yield {"event": "token", "data": json.dumps(block_message)}
+            await history_store.append(current_user.user_id, session_id, req.query, block_message)
+            yield {
+                "event": "done",
+                "data": json.dumps({
+                    "citations": [],
+                    "sources_used": [],
+                    "latency_ms": int((time.monotonic() - t0) * 1000),
+                    "session_id": session_id,
+                }),
+            }
+            return
+
         # Provisional preview based on the raw query, emitted immediately so
         # the UI can show "Searching BSE + RBI…" without waiting on the
         # pipeline. When there's conversation history, the pipeline's own
@@ -227,7 +286,9 @@ async def query_stream(
             enabled_sources=enabled,
         )
 
-        initial_state = await _make_initial_state(req, session_id, history_store, settings)
+        initial_state = await _make_initial_state(
+            req, current_user.user_id, session_id, history_store, settings
+        )
         result = await pipeline.ainvoke(initial_state)
 
         # Stream answer word by word, preserving the model's original
@@ -240,7 +301,7 @@ async def query_stream(
             yield {"event": "token", "data": json.dumps(match.group())}
             await asyncio.sleep(0)   # yield to event loop between tokens
 
-        await history_store.append(session_id, req.query, result["answer"])
+        await history_store.append(current_user.user_id, session_id, req.query, result["answer"])
 
         # Final metadata
         yield {
@@ -261,10 +322,10 @@ async def query_stream(
 @router.get("/conversations", response_model=ConversationsOut)
 async def get_conversations(
     history_store: HistoryStore = Depends(get_history_store),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> ConversationsOut:
-    """The 10 most-recently-active conversations, for the sidebar. No auth
-    in Vyom, so this is a single global list, not scoped per user/browser."""
-    summaries = await history_store.list_recent(10)
+    """This user's 10 most-recently-active conversations, for the sidebar."""
+    summaries = await history_store.list_recent(current_user.user_id, 10)
     return ConversationsOut(
         conversations=[
             ConversationSummaryOut(session_id=s.session_id, title=s.title) for s in summaries
@@ -278,11 +339,12 @@ async def get_conversations(
 async def get_history(
     session_id: str,
     history_store: HistoryStore = Depends(get_history_store),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> HistoryOut:
     """Every turn ever stored for this session — for the frontend to restore
     the visible thread after a page reload. Unbounded (not just the last 5
     the LLM sees — see history_recent_turns in config.py)."""
-    turns = await history_store.get_all(session_id)
+    turns = await history_store.get_all(current_user.user_id, session_id)
     return HistoryOut(turns=[HistoryTurnOut(question=t.question, answer=t.answer) for t in turns])
 
 
@@ -290,6 +352,7 @@ async def get_history(
 async def delete_history(
     session_id: str,
     history_store: HistoryStore = Depends(get_history_store),
+    current_user: CurrentUser = Depends(get_current_user),
 ) -> None:
     """Explicit clear — history has no TTL, so this is the only way it goes away."""
-    await history_store.delete(session_id)
+    await history_store.delete(current_user.user_id, session_id)
