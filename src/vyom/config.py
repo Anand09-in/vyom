@@ -81,6 +81,12 @@ class Settings(BaseSettings):
     # ── Data sources ──────────────────────────────────────────────────────────
     bse_download_folder: str = "./data/bse"
     s3_bucket: str = "vyom-raw-data"
+    # Live web search (current prices, same-day news) — see
+    # retrieve/live_search.py. "live" stays in enabled_sources by default
+    # regardless of whether this is set; retrieve_all silently contributes
+    # nothing if it's empty, so the feature degrades gracefully rather than
+    # needing separate "enabled" vs "configured" bookkeeping.
+    tavily_api_key: str = ""
 
     # ── Eval (RAGAS judge) ────────────────────────────────────────────────────
     # Independent of `provider`/`bedrock_gen_model`: the judge deliberately
@@ -105,9 +111,18 @@ class Settings(BaseSettings):
     # ── API ───────────────────────────────────────────────────────────────────
     cors_origins: str = "http://localhost:3000"
     rate_limit: str = "30/minute"
+    # Structured (pure-JSON, one line per request) events for CloudWatch
+    # metric filters — deliberately a SEPARATE file from the human-readable
+    # app log (journald/stdout), since a metric filter needs to parse each
+    # line as JSON and the normal logging format's timestamp/level/name
+    # prefix would break that. Relative by default so it works unchanged on
+    # both Windows dev (relative to the repo root) and the EC2 deploy
+    # (relative to systemd's WorkingDirectory=/opt/vyom) — see
+    # infra/main.tf's CloudWatch Agent config, which tails this same path.
+    event_log_path: str = "logs/events.jsonl"
 
     # ── Enabled sources ───────────────────────────────────────────────────────
-    enabled_sources: str = "bse,sebi,rbi,cross"
+    enabled_sources: str = "bse,sebi,rbi,cross,live"
 
     @property
     def sources(self) -> list[str]:

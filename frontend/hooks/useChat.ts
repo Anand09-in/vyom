@@ -9,6 +9,7 @@ import {
   fetchHistory,
   deleteHistory,
   fetchConversations,
+  newId,
 } from "@/lib/api";
 
 export function useChat() {
@@ -36,8 +37,8 @@ export function useChat() {
     fetchHistory(id).then((turns) => {
       if (turns.length === 0) return;
       const restored: Message[] = turns.flatMap((t) => [
-        { id: crypto.randomUUID(), role: "user" as const, content: t.question },
-        { id: crypto.randomUUID(), role: "assistant" as const, content: t.answer },
+        { id: newId(), role: "user" as const, content: t.question },
+        { id: newId(), role: "assistant" as const, content: t.answer },
       ]);
       setMessages(restored);
     });
@@ -47,11 +48,11 @@ export function useChat() {
   const send = useCallback(
     async (query: string) => {
       const userMsg: Message = {
-        id: crypto.randomUUID(),
+        id: newId(),
         role: "user",
         content: query,
       };
-      const assistantId = crypto.randomUUID();
+      const assistantId = newId();
       const assistantMsg: Message = {
         id: assistantId,
         role: "assistant",
@@ -137,14 +138,14 @@ export function useChat() {
     setSessionId(id);
     const turns = await fetchHistory(id);
     const restored: Message[] = turns.flatMap((t) => [
-      { id: crypto.randomUUID(), role: "user" as const, content: t.question },
-      { id: crypto.randomUUID(), role: "assistant" as const, content: t.answer },
+      { id: newId(), role: "user" as const, content: t.question },
+      { id: newId(), role: "assistant" as const, content: t.answer },
     ]);
     setMessages(restored);
   }, []);
 
   const startNewConversation = useCallback(() => {
-    const id = crypto.randomUUID();
+    const id = newId();
     setActiveSessionId(id);
     setSessionId(id);
     setMessages([]);

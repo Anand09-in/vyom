@@ -1,5 +1,5 @@
 export interface Citation {
-  type: "bse" | "sebi" | "rbi";
+  type: "bse" | "sebi" | "rbi" | "live";
   id?: number;
   company?: string;
   section?: string;
@@ -7,6 +7,8 @@ export interface Citation {
   title?: string;
   series_id?: string;
   period?: string;
+  url?: string;
+  published_at?: string;
 }
 
 export interface Message {

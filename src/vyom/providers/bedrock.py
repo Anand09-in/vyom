@@ -89,8 +89,10 @@ class BedrockProvider(Provider):
     def embed_query(self, text: str) -> list[float]:
         return self._local.embed_query(text)
 
-    def generate(self, prompt: str, *, system: str | None = None) -> str:
-        guardrail = self._guardrail_config()
+    def generate(
+        self, prompt: str, *, system: str | None = None, apply_guardrail: bool = True
+    ) -> str:
+        guardrail = self._guardrail_config() if apply_guardrail else None
         resp = self._runtime.converse(
             modelId=self._s.bedrock_gen_model,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
@@ -106,8 +108,10 @@ class BedrockProvider(Provider):
             raise GuardrailBlocked(text)
         return text
 
-    def stream(self, prompt: str, *, system: str | None = None) -> Iterator[str]:
-        guardrail = self._guardrail_config()
+    def stream(
+        self, prompt: str, *, system: str | None = None, apply_guardrail: bool = True
+    ) -> Iterator[str]:
+        guardrail = self._guardrail_config() if apply_guardrail else None
         resp = self._runtime.converse_stream(
             modelId=self._s.bedrock_gen_model,
             messages=[{"role": "user", "content": [{"text": prompt}]}],

@@ -6,18 +6,18 @@ The ideas behind Vyom's design, in the order you'd hit them tracing a query thro
 
 All model calls (embed, generate, stream, rerank) go through one abstract interface: [`Provider`](../src/vyom/providers/base.py). Two concrete implementations exist:
 
-- **`LocalProvider`** — BGE-M3 for embeddings, a BGE cross-encoder for reranking, Ollama for generation. Runs entirely on your machine, costs nothing, used for dev.
-- **`BedrockProvider`** — Titan embeddings, Bedrock's managed rerank model, Claude via the Bedrock Converse API. Used in the AWS deployment.
+- **`LocalProvider`** — `nomic-embed-text-v1.5` for embeddings, `bge-reranker-v2-m3` for reranking, Ollama for generation. Runs entirely on your machine, costs nothing, used for dev.
+- **`BedrockProvider`** — generation only, via Bedrock's Converse API (Mistral Large 3). Embedding and reranking are **not** swapped out — `BedrockProvider` delegates those straight to a `LocalProvider` instance internally, since query-time embeddings have to use the exact same model as whatever embedded the corpus at ingest time, and Bedrock's own rerank API has quota/IAM limitations that made local reranking the more reliable choice anyway.
 
-The rest of the codebase (router, pipeline, API) only ever imports `Provider`, never a concrete class. Switching `VYOM_PROVIDER=local` → `VYOM_PROVIDER=bedrock` in `.env` swaps the entire model backend with no code changes — that's the whole point of the seam.
+The rest of the codebase (router, pipeline, API) only ever imports `Provider`, never a concrete class. Switching `VYOM_PROVIDER=local` → `VYOM_PROVIDER=bedrock` in `.env` swaps generation with no code changes — that's the whole point of the seam. It does **not** mean "everything moves to AWS"; embedding and reranking stay local either way.
 
-Heavy ML imports (`torch`, `sentence-transformers`, `boto3`) are deferred inside `@cached_property` methods rather than imported at module load time, so importing the package stays fast and a Lambda running the Bedrock provider never needs `torch` installed.
+Heavy ML imports (`torch`, `sentence-transformers`) are deferred inside `@cached_property` methods rather than imported at module load time, so importing the package stays fast. This matters for the deploy target too: since embed/rerank always run locally regardless of provider, the deployed instance needs `torch` installed either way — see "Deployment" below for why that ruled out Lambda.
 
 ## Hybrid search (dense + sparse + RRF)
 
 Each source table (`filing_chunks`, `circular_chunks`, `rbi_chunks`) is searched two ways in the same SQL query:
 
-- **Dense** — cosine similarity between the query embedding and each chunk's `vector(1024)` column, using an HNSW index (`vector_cosine_ops`) for approximate nearest-neighbor search. Good at semantic/paraphrase matches.
+- **Dense** — cosine similarity between the query embedding and each chunk's `vector(512)` column, using an HNSW index (`vector_cosine_ops`) for approximate nearest-neighbor search. Good at semantic/paraphrase matches.
 - **Sparse** — Postgres full-text search (`tsvector` + `plainto_tsquery`, ranked with `ts_rank_cd`) over a GIN index. Good at exact keyword/acronym matches (e.g. "NPA", "CRAR") that embeddings sometimes blur.
 
 Neither is reliable alone in a finance domain full of exact terminology mixed with natural language questions. **Reciprocal Rank Fusion (RRF)** merges the two ranked lists: each result gets `1 / (60 + rank)` from whichever list(s) it appears in, scores are summed, and the merged list is re-sorted. The constant `60` is the standard RRF damping factor — it flattens the impact of rank 1 vs. rank 2 so one list doesn't dominate. All of this happens as CTEs in a single query (see `hybrid_search_bse` etc. in [repo.py](../src/vyom/store/repo.py)) — one round trip, no merging in Python.
@@ -49,7 +49,7 @@ The LLM never chooses the next graph node at runtime — the only thing it decid
 
 ## Reranking
 
-Hybrid search over-fetches (`top_k`, default 20) because RRF is a cheap, approximate way to get a decent candidate set fast. Those candidates are then passed through the provider's cross-encoder `rerank()` (BGE reranker locally, Bedrock Rerank in the cloud), which scores each `(query, document)` pair directly and is much more accurate than embedding similarity — but far too slow to run over the whole table. Retrieve broad and cheap, then rerank narrow and precise, keeping only `rerank_top_n` (default 5) chunks per source for generation.
+Hybrid search over-fetches (`top_k`, default 20) because RRF is a cheap, approximate way to get a decent candidate set fast. Those candidates are then passed through `rerank()` — always the local `bge-reranker-v2-m3` cross-encoder, regardless of `VYOM_PROVIDER` — which scores each `(query, document)` pair directly and is much more accurate than embedding similarity, but far too slow to run over the whole table. Retrieve broad and cheap, then rerank narrow and precise, keeping only `rerank_top_n` (default 5) chunks per source for generation.
 
 ## Grounded generation with citations
 
@@ -63,12 +63,14 @@ Hybrid search over-fetches (`top_k`, default 20) because RRF is a cheap, approxi
 
 [`config.py`](../src/vyom/config.py) defines one `pydantic-settings` `Settings` class with an `VYOM_` env prefix, loaded once via an `lru_cache`d `get_settings()`. Nothing else in the codebase reads `os.environ` directly — this is what makes `.env.example` the complete list of every tunable in the system, and makes local vs. Bedrock, or which sources are enabled, a config change rather than a code change.
 
-## Deployment: one app, two entrypoints
+## Deployment: one EC2 instance, not Lambda
 
-The FastAPI `app` object in [app.py](../src/vyom/api/app.py) is created once and reused. Locally, `uvicorn` serves it directly (with a lifespan hook that opens the DB pool on startup). On AWS, [lambda_handler.py](../src/vyom/api/lambda_handler.py) wraps the exact same `app` with Mangum, which translates Lambda Function URL events to ASGI and back — `lifespan="off"` because Lambda manages the process lifecycle itself, so the DB pool is instead opened lazily on first request (see `get_pool()` in [deps.py](../src/vyom/api/deps.py)).
+The FastAPI `app` object in [app.py](../src/vyom/api/app.py) is created once and reused everywhere. A Mangum-wrapped Lambda entrypoint exists ([lambda_handler.py](../src/vyom/api/lambda_handler.py)) but isn't the deploy target — the actual production path is `uvicorn` behind nginx on a single EC2 instance (systemd-managed, see `infra/user_data.sh`).
 
-**Running locally on Windows**: plain `uvicorn src.vyom.api.app:app --host 0.0.0.0 --port 8000` hangs forever on every DB query — psycopg's async pool refuses to run on `ProactorEventLoop`, and uvicorn 0.40 hardcodes exactly that as its Windows default (`uvicorn/loops/asyncio.py`) *unless* `--reload` or `--workers >1` is set (their code path passes `use_subprocess=True`, which picks `SelectorEventLoop` instead). Setting `asyncio.set_event_loop_policy(...)` at import time — the fix already used in every ingest script's `__main__` guard — does **not** work here, because uvicorn calls `asyncio.run(..., loop_factory=self.config.get_loop_factory())`, which constructs the loop directly and ignores the global policy entirely. The actual fix is forcing the loop class via uvicorn's own `--loop` flag:
+The reason is the same provider split from above: `embed_query()`/`rerank()` run local PyTorch models in-process on *every* query, regardless of `VYOM_PROVIDER` — Bedrock only replaces generation. That means the deployed process needs ~1-2GB of models loaded into memory, and Lambda would reload them from scratch on every cold start (the interval between requests on a low-traffic app is usually longer than Lambda's warm-container window). An always-on box amortizes that load cost once instead of paying it repeatedly — worth the tradeoff of not being "serverless" for a workload this shaped.
+
+**Running locally on Windows**: plain `uvicorn src.vyom.api.app:app --host 0.0.0.0 --port 8000` hangs forever on every DB query — psycopg's async pool refuses to run on `ProactorEventLoop`, and uvicorn hardcodes exactly that as its Windows default (`uvicorn/loops/asyncio.py`) *unless* `--reload` or `--workers >1` is set (that code path passes `use_subprocess=True`, which picks `SelectorEventLoop` instead). Setting `asyncio.set_event_loop_policy(...)` at import time — the fix already used in every ingest script's `__main__` guard — does **not** work here, because uvicorn calls `asyncio.run(..., loop_factory=self.config.get_loop_factory())`, which constructs the loop directly and ignores the global policy entirely. The practical fix for local dev is just running with `--reload` (which the Windows workaround above happens to trigger as a side effect), or forcing the loop class explicitly:
 ```
 uvicorn src.vyom.api.app:app --host 0.0.0.0 --port 8000 --loop asyncio:SelectorEventLoop
 ```
-`--loop` accepts a `module:attribute` import path, not just the built-in `auto`/`asyncio`/`uvloop` aliases — `asyncio:SelectorEventLoop` points straight at the stdlib class, sidestepping the Windows default without needing `--reload`.
+This is Windows-only — the EC2 deploy runs Linux, where `ProactorEventLoop` doesn't exist and this never comes up.

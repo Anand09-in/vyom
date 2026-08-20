@@ -5,11 +5,15 @@ Reason: Indian financial vocabulary is finite and well-defined.
         A regex classifier is deterministic, free, and adds zero latency.
         An LLM router would cost ~500 tokens per query and add 1-2 seconds.
 
-Four possible route targets:
+Five possible route targets:
   bse   — BSE/NSE corporate filings (annual reports, quarterly results)
   sebi  — SEBI regulatory circulars and enforcement orders
   rbi   — RBI macro data (repo rate, CPI, credit growth, forex)
   cross — requires combining two or more sources
+  live  — current/recency signal (today, right now, latest news) — additive,
+          appended alongside whatever the rest of routing already decided
+          rather than replacing it, since "Reliance stock price right now"
+          still wants the filing-derived company context too
 
 The RouteDecision also carries a human-readable rationale that is surfaced
 in the API response — useful for demos and for debugging bad routing.
@@ -151,6 +155,23 @@ _RBI_SIGNALS = [
     r"\bdbie\b",
 ]
 
+_LIVE_SIGNALS = [
+    r"\bright now\b",
+    r"\bcurrent(ly)?\b",
+    r"\btoday\b",
+    r"\bthis week\b",
+    r"\blatest news\b",
+    r"\bjust announced\b",
+    r"\bbreaking\b",
+    r"\btrading at\b",
+    r"\bshare price\b",
+    r"\bstock price\b",
+    r"\blive price\b",
+    r"\bmarket price\b",
+    r"\bas of now\b",
+    r"\brecent(ly)? announc\w+\b",
+]
+
 _CROSS_TRIGGERS = [
     # Filing + macro
     r"(npa|loan|credit).{0,60}(repo|rate|rbi|inflation|monetary)",
@@ -190,12 +211,13 @@ def route(
     Returns:
         RouteDecision with a list of sources and a human-readable rationale.
     """
-    enabled = set(enabled_sources or ["bse", "sebi", "rbi", "cross"])
+    enabled = set(enabled_sources or ["bse", "sebi", "rbi", "cross", "live"])
 
     cross_hits = _count_hits(query, _CROSS_TRIGGERS)
     bse_hits   = _count_hits(query, _BSE_SIGNALS)
     sebi_hits  = _count_hits(query, _SEBI_SIGNALS)
     rbi_hits   = _count_hits(query, _RBI_SIGNALS)
+    live_hits  = _count_hits(query, _LIVE_SIGNALS)
 
     per_source_hits = {"bse": bse_hits, "sebi": sebi_hits, "rbi": rbi_hits}
     sources_with_signal = [s for s, hits in per_source_hits.items() if hits > 0]
@@ -216,48 +238,46 @@ def route(
     #     single-source queries that only ever hit one category.
     if cross_hits > 0 and "cross" in enabled:
         sources = [s for s in ("bse", "sebi", "rbi") if s in enabled] or ["bse"]
-        return RouteDecision(
-            sources=sources,
-            rationale=(
-                f"Cross-source query detected — pulling from "
-                f"{' + '.join(s.upper() for s in sources)}"
-            ),
+        rationale = (
+            f"Cross-source query detected — pulling from "
+            f"{' + '.join(s.upper() for s in sources)}"
         )
-
-    if len(sources_with_signal) >= 2 and "cross" in enabled:
+    elif len(sources_with_signal) >= 2 and "cross" in enabled:
         sources = [s for s in sources_with_signal if s in enabled] or ["bse"]
-        return RouteDecision(
-            sources=sources,
-            rationale=(
-                f"Cross-source query detected — pulling from "
-                f"{' + '.join(s.upper() for s in sources)}"
-            ),
+        rationale = (
+            f"Cross-source query detected — pulling from "
+            f"{' + '.join(s.upper() for s in sources)}"
         )
+    else:
+        # ── Single-source: highest signal wins ────────────────────────────────
+        scores: dict[str, int] = {}
+        if "bse"  in enabled: scores["bse"]  = bse_hits
+        if "sebi" in enabled: scores["sebi"] = sebi_hits
+        if "rbi"  in enabled: scores["rbi"]  = rbi_hits
 
-    # ── Single-source: highest signal wins ────────────────────────────────────
-    scores: dict[str, int] = {}
-    if "bse"  in enabled: scores["bse"]  = bse_hits
-    if "sebi" in enabled: scores["sebi"] = sebi_hits
-    if "rbi"  in enabled: scores["rbi"]  = rbi_hits
+        if not scores:
+            sources = ["bse"]
+            rationale = "No sources enabled — defaulting to BSE"
+        else:
+            best_source = max(scores, key=lambda k: scores[k])
+            best_score  = scores[best_source]
 
-    if not scores:
-        return RouteDecision(sources=["bse"], rationale="No sources enabled — defaulting to BSE")
+            # ── No signal matched — default to BSE + RBI (broad useful default)
+            if best_score == 0:
+                sources = [s for s in ["bse", "rbi"] if s in enabled]
+                rationale = "General query — searching BSE filings and RBI macro context"
+            else:
+                sources = [best_source]
+                rationale = (
+                    f"Routed to {best_source.upper()} "
+                    f"({best_score} signal {'match' if best_score == 1 else 'matches'})"
+                )
 
-    best_source = max(scores, key=lambda k: scores[k])
-    best_score  = scores[best_source]
+    # ── Live data: additive, not exclusive — appended to whatever the routing
+    # above already decided, so "what is Reliance trading at right now" ends
+    # up as bse + live rather than live replacing the filing lookup.
+    if live_hits > 0 and "live" in enabled and "live" not in sources:
+        sources = [*sources, "live"]
+        rationale += " + LIVE (current/recency signal detected)"
 
-    # ── No signal matched — default to BSE + RBI (broad useful default) ───────
-    if best_score == 0:
-        fallback = [s for s in ["bse", "rbi"] if s in enabled]
-        return RouteDecision(
-            sources=fallback,
-            rationale="General query — searching BSE filings and RBI macro context",
-        )
-
-    return RouteDecision(
-        sources=[best_source],
-        rationale=(
-            f"Routed to {best_source.upper()} "
-            f"({best_score} signal {'match' if best_score == 1 else 'matches'})"
-        ),
-    )
+    return RouteDecision(sources=sources, rationale=rationale)

@@ -71,7 +71,7 @@ export default function Home() {
               BSE · SEBI · RBI
             </span>
             <a
-              href="http://localhost:8000/docs"
+              href="/docs"
               target="_blank"
               rel="noreferrer"
               className="text-xs text-gray-400 hover:text-blue-600 transition-colors"

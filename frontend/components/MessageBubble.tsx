@@ -105,6 +105,17 @@ export function MessageBubble({ message }: Props) {
                       {c.type === "bse" && c.company && `${c.company}${c.section ? ` · ${c.section}` : ""}`}
                       {c.type === "sebi" && c.circular_number && c.circular_number.slice(0, 30)}
                       {c.type === "rbi" && c.series_id && `${c.series_id} · ${c.period ?? ""}`}
+                      {c.type === "live" && c.title && c.url && (
+                        <a
+                          href={c.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="hover:underline hover:text-blue-600"
+                        >
+                          {c.title.slice(0, 40)}
+                          {c.published_at ? ` · ${c.published_at}` : ""}
+                        </a>
+                      )}
                     </span>
                   </span>
                 ))}
@@ -115,7 +126,7 @@ export function MessageBubble({ message }: Props) {
           {/* Footer: latency + feedback */}
           {!message.streaming && (
             <div className="flex items-center gap-3 mt-3 pt-2 border-t border-gray-50">
-              {message.latency_ms && (
+              {message.latency_ms !== undefined && message.latency_ms !== null && (
                 <span className="text-xs text-gray-300">
                   {(message.latency_ms / 1000).toFixed(1)}s
                 </span>

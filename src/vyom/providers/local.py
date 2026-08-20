@@ -84,7 +84,11 @@ class LocalProvider(Provider):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    def generate(self, prompt: str, *, system: str | None = None) -> str:
+    def generate(
+        self, prompt: str, *, system: str | None = None, apply_guardrail: bool = True
+    ) -> str:
+        # No guardrail support locally (Ollama) — apply_guardrail is accepted
+        # only to satisfy the shared Provider interface.
         resp = httpx.post(
             f"{self._s.ollama_host}/api/generate",
             json={
@@ -98,7 +102,9 @@ class LocalProvider(Provider):
         resp.raise_for_status()
         return resp.json()["response"]
 
-    def stream(self, prompt: str, *, system: str | None = None) -> Iterator[str]:
+    def stream(
+        self, prompt: str, *, system: str | None = None, apply_guardrail: bool = True
+    ) -> Iterator[str]:
         with httpx.stream(
             "POST",
             f"{self._s.ollama_host}/api/generate",

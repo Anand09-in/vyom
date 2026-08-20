@@ -15,6 +15,10 @@ const SOURCE_STYLES: Record<string, { label: string; className: string }> = {
     label: "RBI",
     className: "bg-green-50 text-green-700 border-green-200",
   },
+  live: {
+    label: "LIVE",
+    className: "bg-amber-50 text-amber-700 border-amber-200",
+  },
 };
 
 export function SourceBadge({ source }: Props) {

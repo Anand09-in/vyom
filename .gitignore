@@ -22,11 +22,18 @@ eval/results*.json
 .idea/
 .vscode/
 
-# Terraform state (contains secrets)
+# Terraform state and plan files (both can contain secrets in plaintext,
+# e.g. the RDS password — plan files redact sensitive values from CLI
+# output only, not from the file itself)
 infra/.terraform/
 *.tfstate
 *.tfstate.*
 *.tfvars
+*.tfplan
+infra/lambda/*.zip
+
+# Structured request logs — real user ids/queries, not source of truth
+logs/
 
 # Node
 node_modules/

@@ -33,7 +33,24 @@ from vyom.retrieve.router import route
 from vyom.store.history import HistoryStore, Turn
 
 logger = logging.getLogger(__name__)
+# Dedicated pure-JSON logger for structured completion events — configured
+# in app.py's _configure_event_logger. Deliberately not `logger` above:
+# that one has the normal timestamp/level/name prefix, which would break
+# CloudWatch's JSON metric filters (see _log_completion below).
+_events = logging.getLogger("vyom.events")
 router = APIRouter(prefix="/query", tags=["query"], dependencies=[Depends(get_current_user)])
+
+# Stored in place of a guardrail's actual refusal text when saving a turn to
+# history. The refusal text itself ("...attempt to override Vyom's
+# instructions...") reads as prompt-injection-flavored language — if stored
+# verbatim, it gets fed back into classify_and_rewrite's/generate's prompts
+# as conversation history on the *next* turn and can re-trigger the guardrail
+# on an otherwise-unrelated follow-up question. This placeholder carries the
+# same information (a question was asked and blocked) without the
+# attack-shaped phrasing.
+_BLOCKED_HISTORY_PLACEHOLDER = (
+    "[This question was blocked by content-safety guardrails and was not answered.]"
+)
 
 
 # ── Request / response models ─────────────────────────────────────────────────
@@ -52,7 +69,7 @@ class QueryRequest(BaseModel):
 
 
 class CitationOut(BaseModel):
-    type: str                        # 'bse' | 'sebi' | 'rbi'
+    type: str                        # 'bse' | 'sebi' | 'rbi' | 'live'
     id: int | None = None
     company: str | None = None
     section: str | None = None
@@ -60,6 +77,8 @@ class CitationOut(BaseModel):
     title: str | None = None
     series_id: str | None = None
     period: str | None = None
+    url: str | None = None
+    published_at: str | None = None
 
 
 class QueryResponse(BaseModel):
@@ -97,6 +116,35 @@ def _resolve_session_id(req: QueryRequest) -> str:
     return req.session_id or str(uuid.uuid4())
 
 
+def _log_completion(
+    *,
+    status: str,
+    session_id: str,
+    user_id: str,
+    latency_ms: int,
+    sources_used: list[str] | None = None,
+    chunks_retrieved: int | None = None,
+    guardrail_blocked: bool = False,
+) -> None:
+    """One structured line per completed request, at every return point in
+    both /query and /query/stream — the basis for CloudWatch Logs Insights
+    queries and metric filters once shipped by the CloudWatch Agent (see
+    infra/main.tf). Plain logger.info() on a dedicated pure-JSON logger
+    (app.py's _configure_event_logger), not a boto3 put_metric_data call —
+    the app doesn't need to know CloudWatch exists, it just logs normally.
+    status: 'ok' | 'blocked' | 'error'."""
+    _events.info(json.dumps({
+        "event": "query_complete",
+        "status": status,
+        "session_id": session_id,
+        "user_id": user_id,
+        "latency_ms": latency_ms,
+        "sources_used": sources_used or [],
+        "chunks_retrieved": chunks_retrieved,
+        "guardrail_blocked": guardrail_blocked,
+    }))
+
+
 async def _make_initial_state(
     req: QueryRequest, user_id: str, session_id: str, history_store: HistoryStore, settings
 ) -> VyomState:
@@ -111,6 +159,7 @@ async def _make_initial_state(
         filing_chunks=[],
         circular_chunks=[],
         rbi_chunks=[],
+        live_results=[],
         answer="",
         citations=[],
         sources_used=[],
@@ -153,7 +202,13 @@ async def query(
             tokens_used=0,
             provider=settings.provider,
         )
-        await history_store.append(current_user.user_id, session_id, req.query, block_message)
+        await history_store.append(
+            current_user.user_id, session_id, req.query, _BLOCKED_HISTORY_PLACEHOLDER
+        )
+        _log_completion(
+            status="blocked", session_id=session_id, user_id=current_user.user_id,
+            latency_ms=latency,
+        )
         return QueryResponse(
             answer=block_message,
             citations=[],
@@ -171,6 +226,7 @@ async def query(
         rerank_top_n=settings.rerank_top_n,
         max_loops=settings.max_rewrite_loops,
         enabled_sources=enabled,
+        tavily_api_key=settings.tavily_api_key,
     )
 
     try:
@@ -180,6 +236,10 @@ async def query(
         result = await pipeline.ainvoke(initial_state)
     except Exception as exc:
         logger.exception("Pipeline error for query: %s", req.query)
+        _log_completion(
+            status="error", session_id=session_id, user_id=current_user.user_id,
+            latency_ms=int((time.monotonic() - t0) * 1000),
+        )
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     latency = int((time.monotonic() - t0) * 1000)
@@ -201,7 +261,24 @@ async def query(
         provider=settings.provider,
     )
 
-    await history_store.append(current_user.user_id, session_id, req.query, result["answer"])
+    await history_store.append(
+        current_user.user_id,
+        session_id,
+        req.query,
+        _BLOCKED_HISTORY_PLACEHOLDER if result.get("guardrail_blocked") else result["answer"],
+    )
+    _log_completion(
+        status="blocked" if result.get("guardrail_blocked") else "ok",
+        session_id=session_id, user_id=current_user.user_id, latency_ms=latency,
+        sources_used=result.get("sources_used", []),
+        chunks_retrieved=(
+            len(result.get("filing_chunks", []))
+            + len(result.get("circular_chunks", []))
+            + len(result.get("rbi_chunks", []))
+            + len(result.get("live_results", []))
+        ),
+        guardrail_blocked=bool(result.get("guardrail_blocked")),
+    )
 
     return QueryResponse(
         answer=result["answer"],
@@ -248,7 +325,13 @@ async def query_stream(
                 "data": json.dumps({"sources": [], "rationale": "Blocked by input guardrail"}),
             }
             yield {"event": "token", "data": json.dumps(block_message)}
-            await history_store.append(current_user.user_id, session_id, req.query, block_message)
+            await history_store.append(
+                current_user.user_id, session_id, req.query, _BLOCKED_HISTORY_PLACEHOLDER
+            )
+            _log_completion(
+                status="blocked", session_id=session_id, user_id=current_user.user_id,
+                latency_ms=int((time.monotonic() - t0) * 1000),
+            )
             yield {
                 "event": "done",
                 "data": json.dumps({
@@ -284,12 +367,40 @@ async def query_stream(
             rerank_top_n=settings.rerank_top_n,
             max_loops=settings.max_rewrite_loops,
             enabled_sources=enabled,
+            tavily_api_key=settings.tavily_api_key,
         )
 
         initial_state = await _make_initial_state(
             req, current_user.user_id, session_id, history_store, settings
         )
-        result = await pipeline.ainvoke(initial_state)
+        try:
+            result = await pipeline.ainvoke(initial_state)
+        except Exception:
+            # Any unhandled pipeline failure would otherwise abort the SSE
+            # stream outright — sse_starlette surfaces that to the client as
+            # a bare connection failure ("Something went wrong"), not a
+            # readable message. Degrade to the same token/done shape the
+            # early guardrail check uses instead.
+            logger.exception("Pipeline error for streamed query: %s", req.query)
+            error_message = (
+                "Something went wrong while generating a response. Please try again."
+            )
+            yield {"event": "token", "data": json.dumps(error_message)}
+            await history_store.append(current_user.user_id, session_id, req.query, error_message)
+            _log_completion(
+                status="error", session_id=session_id, user_id=current_user.user_id,
+                latency_ms=int((time.monotonic() - t0) * 1000),
+            )
+            yield {
+                "event": "done",
+                "data": json.dumps({
+                    "citations": [],
+                    "sources_used": [],
+                    "latency_ms": int((time.monotonic() - t0) * 1000),
+                    "session_id": session_id,
+                }),
+            }
+            return
 
         # Stream answer word by word, preserving the model's original
         # whitespace (newlines, blank lines between list items, etc.) —
@@ -301,7 +412,25 @@ async def query_stream(
             yield {"event": "token", "data": json.dumps(match.group())}
             await asyncio.sleep(0)   # yield to event loop between tokens
 
-        await history_store.append(current_user.user_id, session_id, req.query, result["answer"])
+        await history_store.append(
+            current_user.user_id,
+            session_id,
+            req.query,
+            _BLOCKED_HISTORY_PLACEHOLDER if result.get("guardrail_blocked") else result["answer"],
+        )
+        _log_completion(
+            status="blocked" if result.get("guardrail_blocked") else "ok",
+            session_id=session_id, user_id=current_user.user_id,
+            latency_ms=result.get("latency_ms", 0),
+            sources_used=result.get("sources_used", []),
+            chunks_retrieved=(
+                len(result.get("filing_chunks", []))
+                + len(result.get("circular_chunks", []))
+                + len(result.get("rbi_chunks", []))
+                + len(result.get("live_results", []))
+            ),
+            guardrail_blocked=bool(result.get("guardrail_blocked")),
+        )
 
         # Final metadata
         yield {

@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS filings (
     source_url   TEXT         NOT NULL,
     pdf_s3_key   TEXT,
     created_at   TIMESTAMPTZ  NOT NULL DEFAULT now(),
-    UNIQUE (bse_code, filing_type, filing_date)
+    UNIQUE (bse_code, filing_type)
 );
 
 CREATE TABLE IF NOT EXISTS filing_chunks (

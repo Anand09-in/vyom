@@ -80,8 +80,8 @@ class Repository:
                 INSERT INTO filings
                     (company_name, bse_code, nse_symbol, filing_type, filing_date, source_url, pdf_s3_key)
                 VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (bse_code, filing_type, filing_date)
-                DO UPDATE SET source_url = EXCLUDED.source_url
+                ON CONFLICT (bse_code, filing_type)
+                DO UPDATE SET source_url = EXCLUDED.source_url, filing_date = EXCLUDED.filing_date
                 RETURNING id
                 """,
                 (company_name, bse_code, nse_symbol, filing_type,
@@ -89,6 +89,31 @@ class Repository:
             )
             row = await cur.fetchone()
             return row["id"]
+
+    async def filing_exists(self, bse_code: str | None, filing_type: str) -> bool:
+        """Cheap existence check, run before the expensive PDF download/
+        extract/embed path — not a substitute for upsert_filing's own
+        ON CONFLICT (which still guards correctness if this check is ever
+        skipped), just avoids redoing work whose result would be thrown
+        away by DO UPDATE / ON CONFLICT DO NOTHING anyway.
+
+        Keyed on (bse_code, filing_type) only, not filing_date: BSE's API
+        doesn't reliably return a stable per-company timestamp, so matching
+        on the exact date let re-runs silently insert duplicate rows instead
+        of skipping. One canonical annual report per company is the actual
+        invariant here."""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT EXISTS(
+                    SELECT 1 FROM filings
+                    WHERE bse_code = %s AND filing_type = %s
+                )
+                """,
+                (bse_code, filing_type),
+            )
+            row = await cur.fetchone()
+            return row["exists"]
 
     async def insert_filing_chunks(self, filing_id: int, chunks: list[dict]) -> None:
         async with self._pool.connection() as conn:
@@ -381,4 +406,10 @@ async def create_pool(settings: Settings) -> AsyncConnectionPool:
         max_size=settings.db_pool_max,
         kwargs={"row_factory": dict_row},
         open=False,
+        # RDS (unlike the old local Docker Postgres) will silently close a
+        # connection that's sat idle past its server-side timeout — without
+        # this, the pool hands out that dead connection on the next request
+        # and the query fails with "server closed the connection
+        # unexpectedly" instead of transparently reconnecting.
+        check=AsyncConnectionPool.check_connection,
     )

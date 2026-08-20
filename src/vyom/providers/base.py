@@ -44,11 +44,27 @@ class Provider(ABC):
         return self.embed([text])[0]
 
     @abstractmethod
-    def generate(self, prompt: str, *, system: str | None = None) -> str:
-        """Generate a complete answer for a prompt."""
+    def generate(
+        self, prompt: str, *, system: str | None = None, apply_guardrail: bool = True
+    ) -> str:
+        """Generate a complete answer for a prompt.
+
+        apply_guardrail=False is for internal-only calls whose output is
+        never shown to the user directly (query condensing, HyDE) — their
+        inputs were already screened when originally submitted (the raw
+        query via check_guardrail(), history via a prior guardrail-checked
+        generate() call), so re-screening the same content on every
+        follow-up turn is redundant and, empirically, prone to false
+        positives on ordinary multi-turn conversations (the "conversation
+        transcript + rewrite instruction" shape itself reads as
+        injection-like to the classifier). The final user-facing generate()
+        call — the one building the actual answer — always keeps this True.
+        """
 
     @abstractmethod
-    def stream(self, prompt: str, *, system: str | None = None) -> Iterator[str]:
+    def stream(
+        self, prompt: str, *, system: str | None = None, apply_guardrail: bool = True
+    ) -> Iterator[str]:
         """Yield generated tokens incrementally (used for SSE responses)."""
 
     @abstractmethod

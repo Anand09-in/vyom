@@ -31,6 +31,7 @@ from typing import TypedDict
 from langgraph.graph import END, StateGraph
 
 from vyom.providers.base import GuardrailBlocked, Provider
+from vyom.retrieve.live_search import WebResult, search_web
 from vyom.retrieve.router import RouteDecision, route
 from vyom.store.repo import CircularChunk, FilingChunk, RbiChunk, Repository
 
@@ -58,10 +59,14 @@ def _normalize_list_formatting(text: str) -> str:
 
 SYSTEM_PROMPT = """You are Vyom, an Indian financial intelligence assistant.
 
-You have access to three data sources:
+You have access to four data sources:
 - BSE/NSE filings: annual reports, quarterly results, risk factors, MD&A
 - SEBI circulars: regulatory orders, NBFC norms, BRSR mandates, enforcement actions
 - RBI data: repo rate, CPI inflation, credit growth, forex, monetary policy
+- LIVE web results: current prices, same-day news/announcements — the only
+  source not pre-verified/audited; treat it as lower-trust than the other
+  three, and be explicit about recency (cite the date given) rather than
+  presenting a web snippet with the same confidence as an official filing.
 
 Rules you must follow:
 1. Answer ONLY from the retrieved context provided below. Never use prior/
@@ -70,11 +75,17 @@ Rules you must follow:
    but every factual claim must still be grounded in the retrieved context.
 2. Every factual claim must cite its source using the exact tag shown at
    the start of that chunk's context, e.g. [BSE:1042], [SEBI:317],
-   [RBI:REPO_RATE:2025-Q2]. Copy the tag exactly as given — for RBI this
-   includes the period, since the same series can appear at multiple
-   periods and the period is what makes each citation unique. Never use
-   the literal words "chunk_id" or "series_id" — always substitute the
-   actual value.
+   [RBI:REPO_RATE:2025-Q2], [LIVE:2] — these are FORMAT examples only, not
+   real citations. Only ever copy a tag that is literally present in the
+   Context section below, character for character. If the Context section
+   below has no "── LIVE WEB RESULTS ──" block (or no block for any other
+   source), that source has nothing to cite this turn — never invent a
+   [LIVE:n] or any other tag for a source with no matching block above,
+   even if this instruction just mentioned that tag format. For RBI,
+   copying the tag exactly includes the period, since the same series can
+   appear at multiple periods and the period is what makes each citation
+   unique. Never use the literal words "chunk_id" or "series_id" — always
+   substitute the actual value.
 3. If the context is insufficient to answer, say so clearly — never fabricate facts.
 4. When multiple sources are available, synthesise across them.
 5. Use plain English. Avoid jargon unless it appears in the source.
@@ -103,12 +114,14 @@ class VyomState(TypedDict):
     filing_chunks: list[FilingChunk]
     circular_chunks: list[CircularChunk]
     rbi_chunks: list[RbiChunk]
+    live_results: list[WebResult]
     answer: str
     citations: list[dict]
     sources_used: list[str]
     loop_count: int
     tokens_used: int
     latency_ms: int
+    guardrail_blocked: bool        # True if any node's generate() call was guardrail-blocked
 
 
 # ── Pipeline builder ───────────────────────────────────────────────────────────
@@ -120,6 +133,7 @@ def build_pipeline(
     rerank_top_n: int = 5,
     max_loops: int = 2,
     enabled_sources: list[str] | None = None,
+    tavily_api_key: str | None = None,
 ):
     """
     Build and compile the Vyom LangGraph pipeline.
@@ -152,6 +166,14 @@ def build_pipeline(
             )
             # Condense the follow-up before routing/retrieval touch it.
             # provider.generate() is a blocking network call — offload it.
+            # apply_guardrail=False: this call's inputs (the raw query and
+            # every history turn) were already guardrail-screened when
+            # originally submitted — see check_guardrail() and the `generate`
+            # node's own guardrailConfig below. Re-screening the same content
+            # here is redundant, and empirically prone to false positives:
+            # the "conversation transcript + rewrite instruction" shape this
+            # prompt necessarily has reads as injection-like to the
+            # classifier, more so as history grows.
             condensed = await asyncio.to_thread(
                 provider.generate,
                 f"Conversation so far:\n{history_block}\n\n"
@@ -168,11 +190,15 @@ def build_pipeline(
                     "system. Be concise and preserve the original intent "
                     "exactly."
                 ),
+                apply_guardrail=False,
             )
             standalone_query = condensed.strip().strip('"')
 
         decision = route(standalone_query, enabled_sources)
 
+        # apply_guardrail=False: same reasoning as the condense call above —
+        # this hypothetical paragraph is never shown to the user, only used
+        # to enrich the retrieval embedding.
         hyp = await asyncio.to_thread(
             provider.generate,
             f"Write one short paragraph that would answer this question about "
@@ -181,6 +207,7 @@ def build_pipeline(
                 "Be concise (2-3 sentences). Use Indian financial terminology "
                 "where relevant. Do not make up specific numbers."
             ),
+            apply_guardrail=False,
         )
 
         rewritten = f"{standalone_query} {hyp[:400]}"
@@ -251,11 +278,18 @@ def build_pipeline(
                 )
                 rbi_chunks = [raw_r[r.index] for r in ranked]
 
+        live_results: list[WebResult] = []
+        if "live" in sources and tavily_api_key:
+            # No rerank step — Tavily already returns ranked, LLM-cleaned
+            # results, unlike the Postgres sources above.
+            live_results = await search_web(state["rewritten_query"], tavily_api_key, max_results=5)
+
         return {
             **state,
             "filing_chunks": filing_chunks,
             "circular_chunks": circular_chunks,
             "rbi_chunks": rbi_chunks,
+            "live_results": live_results,
             "sources_used": sources,
         }
 
@@ -270,6 +304,7 @@ def build_pipeline(
             len(state["filing_chunks"])
             + len(state["circular_chunks"])
             + len(state["rbi_chunks"])
+            + len(state["live_results"])
         )
 
         if total_chunks == 0 and state["loop_count"] < max_loops:
@@ -290,22 +325,24 @@ def build_pipeline(
     async def generate(state: VyomState) -> VyomState:
         """
         Assemble context from all retrieved chunks and call the LLM.
-        Citations are tagged inline: [BSE:id], [SEBI:id], [RBI:id].
+        Citations are tagged inline: [BSE:id], [SEBI:id], [RBI:id], [LIVE:id].
         """
         t0 = time.monotonic()
 
         filings  = state["filing_chunks"]
         circulars = state["circular_chunks"]
         rbi       = state["rbi_chunks"]
+        live      = state["live_results"]
 
         # No context found after all loops
-        if not filings and not circulars and not rbi:
+        if not filings and not circulars and not rbi and not live:
             return {
                 **state,
                 "answer": (
                     "I could not find relevant information in the BSE filings, "
-                    "SEBI circulars, or RBI data for this query. "
-                    "Try rephrasing or asking about a specific Nifty 50 company."
+                    "SEBI circulars, RBI data, or current web results for this "
+                    "query. Try rephrasing or asking about a specific Nifty 50 "
+                    "company."
                 ),
                 "citations": [],
                 "latency_ms": int((time.monotonic() - t0) * 1000),
@@ -357,6 +394,21 @@ def build_pipeline(
                     "period": c.period,
                 })
 
+        if live:
+            context_parts.append("── LIVE WEB RESULTS ──")
+            for i, r in enumerate(live):
+                context_parts.append(
+                    f"[LIVE:{i}] {r.title} ({r.published_at or 'recent'})\n"
+                    f"{r.snippet}\nSource: {r.url}"
+                )
+                citations.append({
+                    "type": "live",
+                    "id": i,
+                    "title": r.title,
+                    "url": r.url,
+                    "published_at": r.published_at,
+                })
+
         context = "\n\n".join(context_parts)
         sources_label = " + ".join(s.upper() for s in state["sources_used"])
 
@@ -392,6 +444,7 @@ def build_pipeline(
                 **state,
                 "answer": exc.message,
                 "citations": [],
+                "guardrail_blocked": True,
                 "latency_ms": latency,
                 "tokens_used": 0,
             }

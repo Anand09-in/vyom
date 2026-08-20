@@ -4,6 +4,22 @@ import { getIdToken } from "@/lib/auth";
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 const SESSION_KEY = "vyom_session_id";
 
+/** crypto.randomUUID() only exists in a secure context (HTTPS, or literally
+ * `localhost`) — it's undefined when the app is served over plain HTTP from
+ * a real host/IP, which throws and breaks the whole page. These ids are
+ * just opaque client-side identifiers (message/session ids), never used for
+ * anything security-sensitive, so a Math.random()-based fallback is fine. */
+export function newId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 /** Every Vyom endpoint except /health requires a Cognito ID token — see
  * api/auth.py. Returns {} (no header) if there's no signed-in session,
  * which the backend will correctly reject with 401 rather than crash on. */
@@ -18,7 +34,7 @@ async function authHeaders(): Promise<Record<string, string>> {
 export function getOrCreateSessionId(): string {
   let id = localStorage.getItem(SESSION_KEY);
   if (!id) {
-    id = crypto.randomUUID();
+    id = newId();
     localStorage.setItem(SESSION_KEY, id);
   }
   return id;

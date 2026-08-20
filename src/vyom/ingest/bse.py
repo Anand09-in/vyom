@@ -34,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 # ── Nifty 50 companies with BSE scrip codes ────────────────────────────────────
 # Format: (company_name, bse_scrip_code, nse_symbol)
+# Nifty 50 constituents. NOTE: "Tata Motors" here is deliberately
+# "Tata Motors Passenger Vehicles" / TMPV, not the plain "Tata Motors" you'd
+# expect — see the comment above NIFTY_NEXT_50's own Tata Motors entry for
+# why (a 2025 demerger split the old TATAMOTORS/500570 identity in two).
 NIFTY_50: list[tuple[str, str, str]] = [
     ("Reliance Industries",          "500325", "RELIANCE"),
     ("Tata Consultancy Services",    "532540", "TCS"),
@@ -61,7 +65,12 @@ NIFTY_50: list[tuple[str, str, str]] = [
     ("Tech Mahindra",                "532755", "TECHM"),
     ("Nestle India",                 "500790", "NESTLEIND"),
     ("ONGC",                         "500312", "ONGC"),
-    ("Tata Motors",                  "500570", "TATAMOTORS"),
+    # Corrected post-demerger (Oct 2025): scrip 500570 / the old TATAMOTORS
+    # symbol now belongs to the passenger-vehicles+JLR entity, renamed
+    # Tata Motors Passenger Vehicles Ltd (NSE: TMPV). The commercial-vehicles
+    # spinoff took over the plain "Tata Motors" name under a NEW code — see
+    # that entry in NIFTY_NEXT_50 below (BSE 544569 / NSE TMCV).
+    ("Tata Motors Passenger Vehicles", "500570", "TMPV"),
     ("Adani Enterprises",            "512599", "ADANIENT"),
     ("JSW Steel",                    "500228", "JSWSTEEL"),
     ("Coal India",                   "533278", "COALINDIA"),
@@ -86,6 +95,68 @@ NIFTY_50: list[tuple[str, str, str]] = [
     ("Adani Ports",                  "532921", "ADANIPORTS"),
     ("HDFC Life Insurance",          "540777", "HDFCLIFE"),
 ]
+
+# Nifty Next 50 — the additional constituents that bring Nifty 50 up to the
+# full Nifty 100. Researched and cross-checked (BSE filings, NSE listings,
+# 2+ sources per company) rather than taken from a single list, since a
+# wrong scrip code here silently fetches the wrong company's filings.
+# BPCL, Britannia Industries, and Divi's Laboratories are Next-50
+# constituents too, but already present in NIFTY_50 above — not duplicated.
+NIFTY_NEXT_50: list[tuple[str, str, str]] = [
+    ("ABB India",                          "500002", "ABB"),
+    ("Adani Energy Solutions",             "539254", "ADANIENSOL"),
+    ("Adani Green Energy",                 "541450", "ADANIGREEN"),
+    ("Adani Power",                        "533096", "ADANIPOWER"),
+    ("Ambuja Cements",                     "500425", "AMBUJACEM"),
+    ("Bajaj Holdings",                     "500490", "BAJAJHLDNG"),
+    ("Bank of Baroda",                     "532134", "BANKBARODA"),
+    ("Bosch",                              "500530", "BOSCHLTD"),
+    ("Canara Bank",                        "532483", "CANBK"),
+    ("CG Power and Industrial Solutions",  "500093", "CGPOWER"),
+    ("Cholamandalam Investment & Finance", "511243", "CHOLAFIN"),
+    ("Cummins India",                      "500480", "CUMMINSIND"),
+    ("DLF",                                "532868", "DLF"),
+    ("Avenue Supermarts",                  "540376", "DMART"),
+    ("GAIL",                               "532155", "GAIL"),
+    ("Godrej Consumer Products",           "532424", "GODREJCP"),
+    ("HDFC Asset Management",              "541729", "HDFCAMC"),
+    ("Hindustan Aeronautics",              "541154", "HAL"),
+    ("Hindustan Zinc",                     "500188", "HINDZINC"),
+    ("Hyundai Motor India",                "544274", "HYUNDAI"),
+    ("Indian Hotels",                      "500850", "INDHOTEL"),
+    ("Indian Oil Corporation",             "530965", "IOC"),
+    ("Indian Railway Finance Corporation", "543257", "IRFC"),
+    ("Jindal Steel & Power",               "532286", "JINDALSTEL"),
+    ("Lodha Developers",                   "543287", "LODHA"),
+    ("LTM",                                "540005", "LTM"),
+    ("Mazagon Dock Shipbuilders",          "543237", "MAZDOCK"),
+    ("Muthoot Finance",                    "533398", "MUTHOOTFIN"),
+    ("Pidilite Industries",                "500331", "PIDILITIND"),
+    ("Power Finance Corporation",          "532810", "PFC"),
+    ("Punjab National Bank",               "532461", "PNB"),
+    ("REC",                                "532955", "RECLTD"),
+    ("Samvardhana Motherson",              "517334", "MOTHERSON"),
+    ("Shree Cement",                       "500387", "SHREECEM"),
+    ("Siemens",                            "500550", "SIEMENS"),
+    ("Siemens Energy India",               "544390", "ENRIN"),
+    ("Solar Industries India",             "532725", "SOLARINDS"),
+    ("Tata Capital",                       "544574", "TATACAP"),
+    # The commercial-vehicles spinoff of the Oct 2025 Tata Motors demerger —
+    # took over the plain "Tata Motors" name under a new BSE/NSE identity.
+    # See NIFTY_50's Tata Motors Passenger Vehicles entry above for the
+    # other half of the split (the old name/code).
+    ("Tata Motors",                        "544569", "TMCV"),
+    ("Tata Power",                         "500400", "TATAPOWER"),
+    ("Torrent Pharmaceuticals",            "500420", "TORNTPHARM"),
+    ("TVS Motor",                          "532343", "TVSMOTOR"),
+    ("Union Bank of India",                "532477", "UNIONBANK"),
+    ("United Spirits",                     "532432", "UNITDSPR"),
+    ("Varun Beverages",                    "540180", "VBL"),
+    ("Vedanta",                            "500295", "VEDL"),
+    ("Zydus Lifesciences",                 "532321", "ZYDUSLIFE"),
+]
+
+NIFTY_100: list[tuple[str, str, str]] = NIFTY_50 + NIFTY_NEXT_50
 
 # BSE API base URL for corporate filings
 BSE_ANNUALREPORT_URL = (
@@ -217,6 +288,14 @@ async def _ingest_one_company(
         return 0
     pdf_url, filing_date = result
 
+    # Change detection — skip the expensive download/extract/embed path
+    # entirely if this exact filing is already in the target database.
+    # Without this, re-running ingest still does all that work before
+    # upsert_filing's ON CONFLICT quietly throws it away.
+    if await repo.filing_exists(scrip_code, "annual_report"):
+        logger.info("%s: already ingested — skipping", company_name)
+        return 0
+
     logger.info("%s: downloading from %s", company_name, pdf_url[:80])
 
     # Step 2: download PDF
@@ -310,7 +389,7 @@ async def run_bse_ingest(
 
     Args:
         companies: List of (company_name, bse_scrip_code, nse_symbol).
-                   Defaults to full Nifty 50.
+                   Defaults to full Nifty 100.
         settings:  Config object. Defaults to get_settings().
     """
     from vyom.store.repo import create_pool, Repository
@@ -318,7 +397,7 @@ async def run_bse_ingest(
 
     settings  = settings or get_settings()
     provider  = get_provider(settings)
-    companies = companies or NIFTY_50
+    companies = companies or NIFTY_100
 
     pool = await create_pool(settings)
     await pool.open()

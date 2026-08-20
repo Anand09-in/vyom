@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +32,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _configure_event_logger(event_log_path: str) -> None:
+    """Structured per-request JSON events (see query.py's _log_completion)
+    go to a dedicated logger/file, deliberately separate from the human-
+    readable app log above — a CloudWatch metric filter needs each line to
+    parse as pure JSON, which the normal timestamp/level/name-prefixed
+    format would break. See infra/main.tf for the CloudWatch Agent config
+    that tails this same path."""
+    path = Path(event_log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    event_logger = logging.getLogger("vyom.events")
+    event_logger.setLevel(logging.INFO)
+    event_logger.propagate = False  # don't also duplicate into the app log above
+
+    handler = logging.FileHandler(path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    event_logger.addHandler(handler)
+
 limiter = Limiter(key_func=get_remote_address)
 
 
@@ -46,6 +66,7 @@ async def lifespan(app: FastAPI):
 
 def create_app() -> FastAPI:
     settings = get_settings()
+    _configure_event_logger(settings.event_log_path)
 
     app = FastAPI(
         title="Vyom API",
