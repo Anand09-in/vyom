@@ -1,11 +1,14 @@
 "use client";
 import { useState, KeyboardEvent } from "react";
+import { Company } from "@/types";
+import { CompanyAutocomplete } from "./CompanyAutocomplete";
 
 interface Props {
   onSend: (query: string) => void;
   loading: boolean;
   company: string;
   onCompanyChange: (v: string) => void;
+  companies: Company[];
 }
 
 const EXAMPLES = [
@@ -13,9 +16,10 @@ const EXAMPLES = [
   "Latest SEBI BRSR disclosure requirements for listed companies",
   "What is RBI repo rate trend and its impact on bank margins?",
   "Given Reliance capex plans, what does RBI credit growth say?",
+  "What is Infosys share price trading at right now?",
 ];
 
-export function ChatInput({ onSend, loading, company, onCompanyChange }: Props) {
+export function ChatInput({ onSend, loading, company, onCompanyChange, companies }: Props) {
   const [value, setValue] = useState("");
 
   const submit = () => {
@@ -33,32 +37,24 @@ export function ChatInput({ onSend, loading, company, onCompanyChange }: Props) 
   };
 
   return (
-    <div className="border-t border-gray-100 bg-white px-4 pt-3 pb-4">
+    <div className="border-t border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 px-4 pt-3 pb-4">
       {/* Example queries */}
-      <div className="flex gap-2 mb-2 flex-wrap">
+      <div className="flex gap-2 mb-2 flex-wrap justify-center">
         {EXAMPLES.map((ex) => (
           <button
             key={ex}
             onClick={() => onSend(ex)}
             disabled={loading}
-            className="text-xs px-3 py-1 rounded-full bg-gray-50 text-gray-500 hover:bg-blue-50 hover:text-blue-700 transition-colors border border-gray-200 disabled:opacity-40"
+            className="text-xs px-3 py-1.5 rounded-full bg-gray-50 dark:bg-gray-800 text-gray-500 dark:text-gray-400 hover:bg-blue-50 dark:hover:bg-blue-950 hover:text-blue-700 dark:hover:text-blue-300 transition-colors border border-gray-200 dark:border-gray-700 disabled:opacity-40 text-left"
           >
-            {ex.length > 48 ? ex.slice(0, 48) + "…" : ex}
+            {ex}
           </button>
         ))}
       </div>
 
       {/* Input row */}
       <div className="flex gap-2 items-end">
-        {/* Company filter */}
-        <input
-          type="text"
-          placeholder="Company"
-          value={company}
-          onChange={(e) => onCompanyChange(e.target.value)}
-          className="w-28 px-3 py-2 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-400"
-          maxLength={30}
-        />
+        <CompanyAutocomplete companies={companies} value={company} onChange={onCompanyChange} />
 
         {/* Query textarea */}
         <textarea
@@ -68,7 +64,7 @@ export function ChatInput({ onSend, loading, company, onCompanyChange }: Props) 
           onKeyDown={onKey}
           placeholder="Ask about BSE filings, SEBI circulars, or RBI macro data…"
           disabled={loading}
-          className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-50"
+          className="flex-1 px-3 py-2 text-sm border border-gray-200 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder:text-gray-500 rounded-xl resize-none focus:outline-none focus:ring-2 focus:ring-blue-400 disabled:opacity-50"
         />
 
         {/* Send button */}
@@ -81,7 +77,7 @@ export function ChatInput({ onSend, loading, company, onCompanyChange }: Props) 
         </button>
       </div>
 
-      <p className="text-xs text-gray-300 mt-2 text-center">
+      <p className="text-xs text-gray-300 dark:text-gray-600 mt-2 text-center">
         Vyom searches BSE filings · SEBI circulars · RBI macro data
       </p>
     </div>

@@ -1,6 +1,6 @@
 "use client";
 import { useState, useCallback, useEffect } from "react";
-import { Message, Citation, ConversationSummary } from "@/types";
+import { Message, Citation, Company, ConversationSummary } from "@/types";
 import {
   queryStream,
   submitFeedback,
@@ -9,6 +9,7 @@ import {
   fetchHistory,
   deleteHistory,
   fetchConversations,
+  fetchCompanies,
   newId,
 } from "@/lib/api";
 
@@ -18,6 +19,7 @@ export function useChat() {
   const [company, setCompany] = useState("");
   const [sessionId, setSessionId] = useState("");
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
+  const [companies, setCompanies] = useState<Company[]>([]);
 
   const refreshConversations = useCallback(() => {
     fetchConversations().then(setConversations);
@@ -43,6 +45,10 @@ export function useChat() {
       setMessages(restored);
     });
     refreshConversations();
+    // Fetched once — 97 short strings, no reason to refetch per keystroke
+    // or on every render. Reflects what's actually ingested (repo.py's
+    // list_companies()), not a hardcoded frontend copy that could drift.
+    fetchCompanies().then(setCompanies);
   }, [refreshConversations]);
 
   const send = useCallback(
@@ -168,6 +174,7 @@ export function useChat() {
     loading,
     company,
     setCompany,
+    companies,
     send,
     feedback,
     conversations,

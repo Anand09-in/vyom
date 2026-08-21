@@ -72,16 +72,64 @@ class BedrockProvider(Provider):
             source="INPUT",
             content=[{"text": {"text": text}}],
         )
-        if resp.get("action") == "GUARDRAIL_INTERVENED":
-            outputs = resp.get("outputs", [])
-            if outputs:
-                return outputs[0]["text"]
+        if resp.get("action") != "GUARDRAIL_INTERVENED":
+            return None
+        return self._blocked_message(resp)
+
+    def _blocked_message(self, resp: dict) -> str:
+        """Bedrock's own blocked_input_messaging is a single generic string
+        configured once at the guardrail resource level and returned
+        verbatim no matter which policy actually fired — so a guaranteed-
+        return question was getting told it "looks like an attempt to
+        override instructions," which is simply wrong. Inspect the
+        assessment to find the real reason and return a message that
+        matches it instead."""
+        assessment = (resp.get("assessments") or [{}])[0]
+
+        topics = {
+            t["name"]
+            for t in assessment.get("topicPolicy", {}).get("topics", [])
+            if t.get("detected")
+        }
+        if "investment-recommendations" in topics:
+            return (
+                "Vyom isn't a SEBI-registered investment adviser, so it "
+                "can't recommend a specific security to buy or sell, or "
+                "promise a guaranteed/fixed return — market-linked "
+                "investments always carry risk."
+            )
+        if "illegal-cross-border-funds" in topics:
+            return (
+                "This request can't be processed — it asks for help moving "
+                "money across India's borders in a way that would evade "
+                "FEMA reporting or tax obligations."
+            )
+
+        filters = {
+            f["type"]
+            for f in assessment.get("contentPolicy", {}).get("filters", [])
+            if f.get("detected")
+        }
+        if "PROMPT_ATTACK" in filters:
             return (
                 "This request can't be processed — it looks like an attempt "
                 "to override Vyom's instructions rather than a genuine "
                 "question about Indian financial or regulatory data."
             )
-        return None
+
+        if assessment.get("sensitiveInformationPolicy", {}).get("regexes"):
+            return (
+                "This request can't be processed — it contains a personal "
+                "identifier Vyom won't handle."
+            )
+
+        outputs = resp.get("outputs", [])
+        if outputs:
+            return outputs[0]["text"]
+        return (
+            "This request can't be processed — it doesn't look like a "
+            "genuine question about Indian financial or regulatory data."
+        )
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         return self._local.embed(texts)

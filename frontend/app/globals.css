@@ -1,8 +1,21 @@
 @import "tailwindcss";
 
+/* Class-based dark mode (Tailwind v4) — .dark on <html>, set by the
+   pre-hydration script in layout.tsx, toggled by ThemeToggle.tsx. Without
+   this, `dark:` only ever follows the OS setting with no way to override it. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
+}
+
+/* Base <body> layer, independent of whatever bg-* a page's own root div
+   sets — without this override it stays white in dark mode (e.g. behind
+   content shorter than the viewport, or during the pre-hydration paint). */
+.dark {
+  --background: #030712;
+  --foreground: #f3f4f6;
 }
 
 @theme inline {

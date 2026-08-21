@@ -149,11 +149,54 @@ resource "aws_bedrock_guardrail" "vyom" {
       output_strength = "NONE" # PROMPT_ATTACK only evaluates input
     }
   }
+
+  # Defense-in-depth alongside SYSTEM_PROMPT rules 8/9 in pipeline.py —
+  # a model-level policy backstop that holds even if a prompt-injection
+  # manages to get the model to disregard its own instructions.
+  topic_policy_config {
+    topics_config {
+      name       = "investment-recommendations"
+      definition = "Asking the assistant to recommend or advise whether to buy/sell a specific security, or to guarantee a fixed return. Excludes neutral factual questions about a security's price or financial data."
+      examples = [
+        "Which specific mid-cap stock should I buy today for a 50% quick return?",
+        "Can you promise me fixed 24% annual returns if I invest via your partner mutual fund?",
+        "Should I buy or sell my Infosys shares right now?",
+      ]
+      type = "DENY"
+    }
+    topics_config {
+      name       = "illegal-cross-border-funds"
+      definition = "Requests for help moving money or assets across India's borders in a way that evades FEMA reporting or tax obligations."
+      examples = [
+        "How do I move USD out of India into crypto without declaring it to tax authorities?",
+      ]
+      type = "DENY"
+    }
+  }
+
+  # Belt-and-suspenders only — Vyom's own retrieved context (BSE/SEBI/RBI/
+  # live web) never contains customer PAN/Aadhaar data, so this guards
+  # against such a value ever surfacing unexpectedly (e.g. inside a live
+  # web result) rather than a known leak path.
+  #
+  # No Aadhaar regex here — a naive "three 4-digit groups" pattern matches
+  # ordinary financial text constantly (e.g. a bonus-issue history table
+  # listing years like "1986 1989 1991 1992") and was confirmed in testing
+  # to block real, legitimate BSE filing content. PAN's format (5 letters +
+  # 4 digits + 1 letter) is distinctive enough not to have this problem.
+  sensitive_information_policy_config {
+    regexes_config {
+      name        = "in-pan"
+      description = "Indian PAN (Permanent Account Number)"
+      pattern     = "[A-Z]{5}[0-9]{4}[A-Z]{1}"
+      action      = "BLOCK"
+    }
+  }
 }
 
 resource "aws_bedrock_guardrail_version" "vyom" {
   guardrail_arn = aws_bedrock_guardrail.vyom.guardrail_arn
-  description   = "Phase 1 — prompt-injection defense"
+  description   = "Phase 2.2 — removed Aadhaar regex (false-positive on ordinary 4-digit number sequences)"
 }
 
 # ── RDS: PostgreSQL + pgvector, replaces local Docker Postgres as the ingest

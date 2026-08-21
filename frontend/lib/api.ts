@@ -1,4 +1,4 @@
-import { ConversationSummary, HistoryTurn } from "@/types";
+import { Company, ConversationSummary, HistoryTurn } from "@/types";
 import { getIdToken } from "@/lib/auth";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -119,6 +119,15 @@ export async function deleteHistory(sessionId: string): Promise<void> {
     method: "DELETE",
     headers: await authHeaders(),
   });
+}
+
+export async function fetchCompanies(): Promise<Company[]> {
+  const res = await fetch(`${API_BASE}/query/companies`, {
+    headers: await authHeaders(),
+  });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.companies ?? [];
 }
 
 export async function fetchConversations(): Promise<ConversationSummary[]> {

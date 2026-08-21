@@ -138,6 +138,24 @@ class Repository:
                     ],
                 )
 
+    async def list_companies(self) -> list[dict]:
+        """Every company with at least one ingested filing — backs the
+        frontend's company autocomplete (ChatInput.tsx). Reads the actual
+        database rather than a hardcoded list, so it can't drift out of
+        sync with what's really been ingested (the Tata Motors demerger
+        bug earlier was exactly this kind of drift, just in the other
+        direction — a hardcoded list going stale against reality)."""
+        async with self._pool.connection() as conn:
+            cur = await conn.execute(
+                """
+                SELECT DISTINCT bse_code, company_name
+                FROM filings
+                ORDER BY company_name
+                """
+            )
+            rows = await cur.fetchall()
+            return [{"name": r["company_name"], "bse_code": r["bse_code"]} for r in rows]
+
     # ── BSE hybrid search ─────────────────────────────────────────────────────
 
     async def hybrid_search_bse(

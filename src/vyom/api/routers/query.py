@@ -109,6 +109,15 @@ class HistoryOut(BaseModel):
     turns: list[HistoryTurnOut]
 
 
+class CompanyOut(BaseModel):
+    name: str
+    bse_code: str | None = None
+
+
+class CompaniesOut(BaseModel):
+    companies: list[CompanyOut]
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _resolve_session_id(req: QueryRequest) -> str:
@@ -444,6 +453,18 @@ async def query_stream(
         }
 
     return EventSourceResponse(event_generator())
+
+
+# ── GET /query/companies ─────────────────────────────────────────────────────
+
+@router.get("/companies", response_model=CompaniesOut)
+async def get_companies(repo=Depends(get_repo)) -> CompaniesOut:
+    """Every company with at least one ingested filing — backs the
+    frontend's company autocomplete. Reflects the real database, not a
+    hardcoded list that can drift out of sync with what's actually
+    ingested."""
+    companies = await repo.list_companies()
+    return CompaniesOut(companies=[CompanyOut(**c) for c in companies])
 
 
 # ── GET /query/conversations ──────────────────────────────────────────────────

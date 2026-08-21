@@ -43,3 +43,8 @@ export interface ConversationSummary {
   session_id: string;
   title: string;
 }
+
+export interface Company {
+  name: string;
+  bse_code?: string;
+}
