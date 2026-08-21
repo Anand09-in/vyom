@@ -17,7 +17,7 @@
 
 A single-source RAG can't answer that — it needs a BSE filing, RBI macro data, *and* a live web search, fused into one cited answer. Vyom routes each query to the right source(s), retrieves, and answers only from what it actually found — with inline citations back to the exact filing, circular, series, or web result.
 
-## Screenshots
+## Glimpses
 
 | | |
 |---|---|
@@ -92,6 +92,8 @@ RAGAS on a 31-question golden set (single-turn + multi-turn):
 | Faithfulness | Answer relevancy | Context precision | Context recall |
 |---|---|---|---|
 | 0.84 | 0.79 | 0.33 | 0.44 |
+
+![RAGAS metrics in MLflow](docs/screenshots/metrics.png)
 
 ## Running locally
 
