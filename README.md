@@ -50,7 +50,7 @@ flowchart TD
     Browser -->|"Bearer ID token"| API --> Precheck
     Precheck -->|clear| Pipeline
     Precheck -.->|blocked| Blocked
-    Pipeline --> Store --> Browser
+    Pipeline --> Store
     Blocked --> Store
 
     RDS[("RDS<br/>pgvector")]
